@@ -3,8 +3,9 @@ Registre des Timbres Fiscaux — Application Flask
 Étude de commissaire de justice
 
 INTÉGRITÉ DU REGISTRE :
-  AUCUN bouton de suppression ou d'annulation n'est disponible dans l'interface.
-  Ces opérations se font uniquement par édition directe des fichiers JSON.
+  Les opérations sensibles (suppression, annulation, modification) sont
+  accessibles via la page /admin (mot de passe requis).
+  Elles peuvent aussi être effectuées manuellement dans les fichiers JSON :
     - Suppression   : retirer le bloc du timbre dans timbres_{année}.json
                       + supprimer le PDF correspondant dans data/pdfs/
     - Annulation    : remettre statut="disponible", dossier=null,
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from flask import (Flask, flash, make_response, redirect,
                    render_template_string, request, send_from_directory,
-                   url_for)
+                   session, url_for)
 from pypdf import PdfReader, PdfWriter
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -26,15 +27,18 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 # ---------------------------------------------------------------------------
 # Chemins réseau (fixés en dur)
 # ---------------------------------------------------------------------------
-RESEAU_DIR = Path(r"\\SERVEUR\COMMUN\GESTION-TF")
-DATA_DIR   = RESEAU_DIR / "data"
-PDF_DIR    = DATA_DIR   / "pdfs"
+RESEAU_DIR  = Path(r"\\SERVEUR\COMMUN\GESTION-TF")
+DATA_DIR    = RESEAU_DIR / "data"
+PDF_DIR     = DATA_DIR   / "pdfs"
+JUSTIF_DIR  = DATA_DIR   / "justificatifs"
+JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
-MONTANT_TIMBRE = 50.0
-SEUIL_ALERTE   = 5
+MONTANT_TIMBRE  = 50.0
+SEUIL_ALERTE    = 5
+ADMIN_PASSWORD  = "csevilla1"
 
 # ---------------------------------------------------------------------------
 # Flask
@@ -80,6 +84,20 @@ def load_all() -> list:
     for year in sorted(annees_disponibles()):
         result.extend(load_year(year))
     return result
+
+
+def load_justificatifs() -> list:
+    if not JUSTIF_FILE.exists():
+        return []
+    with open(JUSTIF_FILE, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_justificatifs(data: list):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        with open(JUSTIF_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
 
 
 def save_timbre(timbre: dict):
@@ -298,6 +316,8 @@ select:focus{outline:none;border-color:var(--or)}
     <a href="/" class="{{ 'active' if active=='db' else '' }}">Tableau de bord</a>
     <a href="/disponibles" class="{{ 'active' if active=='dispo' else '' }}">Disponibles</a>
     <a href="/historique" class="{{ 'active' if active=='hist' else '' }}">Historique</a>
+    <a href="/justificatifs" class="{{ 'active' if active=='justif' else '' }}">Justificatifs</a>
+    <a href="/admin" class="{{ 'active' if active=='admin' else '' }}">⚙ Administration</a>
   </div>
   <div class="nav-right">
     <a href="/export-excel" class="btn-excel">⬇ Excel</a>
@@ -470,10 +490,26 @@ def import_lot():
         start_idx = len(existing)
 
         PDF_DIR.mkdir(parents=True, exist_ok=True)
+        JUSTIF_DIR.mkdir(parents=True, exist_ok=True)
         nouveaux = []
 
         for i, page in enumerate(reader.pages):
             text   = page.extract_text() or ""
+            # Extraire et sauvegarder la page "Justificatif de paiement à conserver"
+            if "JUSTIFICATIF DE PAIEMENT" in text.upper():
+                justif_uuid = uuid.uuid4().hex + ".pdf"
+                w = PdfWriter()
+                w.add_page(page)
+                with open(JUSTIF_DIR / justif_uuid, "wb") as fj:
+                    w.write(fj)
+                justifs = load_justificatifs()
+                justifs.append({
+                    "id":         str(uuid.uuid4()),
+                    "date_achat": date_achat,
+                    "pdf":        justif_uuid,
+                })
+                save_justificatifs(justifs)
+                continue
             numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
 
             pdf_uuid = uuid.uuid4().hex + ".pdf"
@@ -543,12 +579,19 @@ def disponibles():
   <h2>Attribuer ce timbre</h2>
   <form method="post" action="/utiliser">
     <input type="hidden" name="timbre_id" value="{prochain['id']}">
-    <div class="form-row">
-      <label for="dossier">Référence dossier / affaire</label>
-      <input type="text" id="dossier" name="dossier" autofocus required
-             placeholder="Ex. : 2025-042 · Dupont / SCI Les Pins">
+    <div style="display:grid;grid-template-columns:1fr 180px;gap:1rem">
+      <div class="form-row" style="margin-bottom:0">
+        <label for="dossier">Référence dossier / affaire</label>
+        <input type="text" id="dossier" name="dossier" autofocus required
+               placeholder="Ex. : 2025-042 · Dupont / SCI Les Pins">
+      </div>
+      <div class="form-row" style="margin-bottom:0">
+        <label for="code_clerc">Code clerc</label>
+        <input type="text" id="code_clerc" name="code_clerc" required
+               placeholder="Ex. : CL01">
+      </div>
     </div>
-    <button type="submit" class="btn">Attribuer ce timbre</button>
+    <button type="submit" class="btn" style="margin-top:1rem">Attribuer ce timbre</button>
   </form>
 </div>
 {"<p class='note'>📋 " + str(en_attente) + " timbre(s) en attente derrière celui-ci.</p>" if en_attente > 0 else ""}
@@ -570,10 +613,11 @@ def disponibles():
 
 @app.route("/utiliser", methods=["POST"])
 def utiliser():
-    timbre_id = request.form.get("timbre_id", "").strip()
-    dossier   = request.form.get("dossier",   "").strip()
+    timbre_id  = request.form.get("timbre_id",  "").strip()
+    dossier    = request.form.get("dossier",    "").strip()
+    code_clerc = request.form.get("code_clerc", "").strip()
 
-    if not timbre_id or not dossier:
+    if not timbre_id or not dossier or not code_clerc:
         flash("Données manquantes.", "error")
         return redirect(url_for("disponibles"))
 
@@ -590,10 +634,11 @@ def utiliser():
 
     timbre["statut"]           = "utilisé"
     timbre["dossier"]          = dossier
+    timbre["code_clerc"]       = code_clerc
     timbre["date_utilisation"] = date.today().isoformat()
     save_timbre(timbre)
 
-    flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} ».", "success")
+    flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
     return redirect(url_for("telecharger", timbre_id=timbre_id))
 
 
@@ -702,6 +747,7 @@ def historique():
                 f'<tr class="hr">'
                 f'<td class="mono">{t["numero"]}</td>'
                 f'<td>{t.get("dossier") or "—"}</td>'
+                f'<td>{t.get("code_clerc") or "—"}</td>'
                 f'<td>{t.get("date_utilisation") or "—"}</td>'
                 f'<td>{btn_pdf}</td>'
                 f'</tr>'
@@ -714,7 +760,7 @@ def historique():
     <span style="margin-left:auto;font-weight:600">{mt_lot:,.2f} €</span>
   </div>
   <table>
-    <thead><tr><th>N° Timbre</th><th>Dossier / Affaire</th><th>Date utilisation</th><th>PDF</th></tr></thead>
+    <thead><tr><th>N° Timbre</th><th>Dossier / Affaire</th><th>Code clerc</th><th>Date utilisation</th><th>PDF</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
@@ -756,6 +802,67 @@ function filtrer(){{
 
 
 # ---------------------------------------------------------------------------
+# PAGE 4 — JUSTIFICATIFS DE PAIEMENT
+# ---------------------------------------------------------------------------
+
+@app.route("/justificatifs")
+def justificatifs():
+    justifs = sorted(load_justificatifs(), key=lambda j: j["date_achat"], reverse=True)
+
+    # Regroupement par date_achat
+    lots: dict[str, list] = {}
+    for j in justifs:
+        lots.setdefault(j["date_achat"], []).append(j)
+
+    blocs = ""
+    for date_a, items in lots.items():
+        rows = ""
+        for idx, j in enumerate(items, 1):
+            pdf_url = url_for("serve_justificatif", filename=j["pdf"])
+            rows += (
+                f'<tr>'
+                f'<td>Justificatif {idx}</td>'
+                f'<td>{date_a}</td>'
+                f'<td style="display:flex;gap:.5rem">'
+                f'<button class="btn" style="padding:.25rem .7rem;font-size:.82rem" '
+                f'onclick="ouvrirPdf(\'{pdf_url}\',\'Justificatif {date_a}\')">📄 Voir</button>'
+                f'<a class="btn" style="padding:.25rem .7rem;font-size:.82rem;text-decoration:none" '
+                f'href="{pdf_url}" download="justificatif-{date_a}.pdf">⬇ Télécharger</a>'
+                f'</td>'
+                f'</tr>'
+            )
+        blocs += f"""
+<div class="lot-block" style="margin-bottom:1.4rem">
+  <div class="lot-header">
+    🧾 Lot du {date_a}
+    <span class="lot-pill">{len(items)} justificatif(s)</span>
+  </div>
+  <table>
+    <thead><tr><th>Document</th><th>Date d'achat</th><th>Actions</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+
+    if not blocs:
+        blocs = "<div class='empty'>Aucun justificatif enregistré. Les prochains imports les ajouteront automatiquement.</div>"
+
+    nb = len(justifs)
+    content = f"""<h1>Justificatifs de paiement</h1>
+<p class="subtitle">{nb} justificatif(s) conservé(s)</p>
+{blocs}"""
+    return render_page("Justificatifs", "justif", content)
+
+
+@app.route("/justificatifs/pdf/<filename>")
+def serve_justificatif(filename: str):
+    # Vérifier que le fichier appartient bien aux justificatifs enregistrés
+    justifs = load_justificatifs()
+    if not any(j["pdf"] == filename for j in justifs):
+        return "Accès refusé.", 403
+    return send_from_directory(str(JUSTIF_DIR), filename, mimetype="application/pdf")
+
+
+# ---------------------------------------------------------------------------
 # EXPORT EXCEL
 # ---------------------------------------------------------------------------
 
@@ -784,7 +891,7 @@ def export_excel():
         )
         ws = wb.create_sheet(title=str(year))
 
-        headers = ["N° Timbre", "Date achat", "Montant (€)", "Statut", "Dossier", "Date utilisation"]
+        headers = ["N° Timbre", "Date achat", "Montant (€)", "Statut", "Dossier", "Code clerc", "Date utilisation"]
         ws.append(headers)
         for col in range(1, len(headers) + 1):
             c = ws.cell(row=1, column=col)
@@ -799,6 +906,7 @@ def export_excel():
                 t["numero"], t["date_achat"], t["montant"],
                 label,
                 t.get("dossier") or "",
+                t.get("code_clerc") or "",
                 t.get("date_utilisation") or "",
             ])
             r  = ws.max_row
@@ -815,7 +923,7 @@ def export_excel():
                 for col in [1, 2, 3, 5, 6]:
                     ws.cell(row=r, column=col).fill = PatternFill("solid", fgColor="faf9f6")
 
-        for i, w in enumerate([22, 15, 13, 14, 40, 18], 1):
+        for i, w in enumerate([22, 15, 13, 14, 40, 14, 18], 1):
             ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
         ws.row_dimensions[1].height = 22
 
@@ -829,6 +937,252 @@ def export_excel():
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# PAGE 5 — ADMINISTRATION (protégée par mot de passe)
+# ---------------------------------------------------------------------------
+
+def admin_requis():
+    """Retourne une redirection si l'admin n'est pas connecté, None sinon."""
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+    return None
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    erreur = ""
+    if request.method == "POST":
+        if request.form.get("password", "") == ADMIN_PASSWORD:
+            session["admin"] = True
+            return redirect(url_for("admin"))
+        erreur = "Mot de passe incorrect."
+
+    content = f"""
+<div style="max-width:380px;margin:4rem auto">
+  <div class="card">
+    <h2 style="margin-bottom:1.2rem">⚙ Administration</h2>
+    {"<div class='alert alert-error'>" + erreur + "</div>" if erreur else ""}
+    <form method="post">
+      <div class="form-row">
+        <label for="pw">Mot de passe</label>
+        <input type="password" id="pw" name="password" autofocus required
+               placeholder="••••••••" style="max-width:100%">
+      </div>
+      <button type="submit" class="btn" style="width:100%">Accéder</button>
+    </form>
+  </div>
+</div>"""
+    return render_page("Administration", "admin", content)
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin", None)
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/admin")
+def admin():
+    redir = admin_requis()
+    if redir:
+        return redir
+
+    annee_param = request.args.get("annee", "toutes")
+    statut_param = request.args.get("statut", "tous")
+    annees = annees_disponibles()
+
+    if annee_param == "toutes":
+        timbres = load_all()
+    else:
+        try:
+            timbres = load_year(int(annee_param))
+        except ValueError:
+            timbres = load_all()
+            annee_param = "toutes"
+
+    if statut_param == "disponible":
+        timbres = [t for t in timbres if t["statut"] == "disponible"]
+    elif statut_param == "utilisé":
+        timbres = [t for t in timbres if t["statut"] == "utilisé"]
+
+    timbres_sorted = sorted(timbres, key=lambda t: (t["date_achat"], t.get("date_utilisation") or ""), reverse=True)
+
+    # Sélecteur années
+    opts_a = f'<option value="toutes"{"  selected" if annee_param=="toutes" else ""}>Toutes les années</option>\n'
+    for a in annees:
+        sel = " selected" if str(a) == annee_param else ""
+        opts_a += f'<option value="{a}"{sel}>{a}</option>\n'
+
+    opts_s = ""
+    for val, lbl in [("tous","Tous les statuts"),("disponible","Disponibles"),("utilisé","Utilisés")]:
+        sel = " selected" if statut_param == val else ""
+        opts_s += f'<option value="{val}"{sel}>{lbl}</option>\n'
+
+    rows = ""
+    for t in timbres_sorted:
+        badge = (
+            "<span class='badge badge-d'>Disponible</span>"
+            if t["statut"] == "disponible"
+            else "<span class='badge badge-u'>Utilisé</span>"
+        )
+        dossier_val = t.get("dossier") or ""
+        # Formulaire inline modification dossier
+        form_dossier = f"""
+<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;min-width:240px">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <input type="text" name="dossier" value="{dossier_val}"
+         style="flex:1;padding:.3rem .6rem;font-size:.88rem"
+         placeholder="Référence dossier">
+  <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem">✔</button>
+</form>"""
+        # Bouton remettre disponible (si utilisé)
+        btn_reset = ""
+        if t["statut"] == "utilisé":
+            btn_reset = f"""
+<form method="post" action="/admin/remettre-disponible" style="display:inline">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <button type="submit" class="btn"
+          style="padding:.3rem .7rem;font-size:.82rem;background:#27ae60"
+          onclick="return confirm('Remettre ce timbre en stock disponible ?')">↩ Disponible</button>
+</form>"""
+        # Bouton supprimer
+        btn_suppr = f"""
+<form method="post" action="/admin/supprimer" style="display:inline">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <button type="submit" class="btn"
+          style="padding:.3rem .7rem;font-size:.82rem;background:#c0392b;color:#fff"
+          onclick="return confirm('Supprimer définitivement ce timbre ? Cette action est irréversible.')">🗑 Supprimer</button>
+</form>"""
+
+        rows += f"""<tr class="adm-row">
+  <td class="mono">{t['numero']}</td>
+  <td>{t['date_achat']}</td>
+  <td>{badge}</td>
+  <td>{form_dossier}</td>
+  <td>{t.get('code_clerc') or '—'}</td>
+  <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
+</tr>"""
+
+    if not rows:
+        rows = "<tr><td colspan='5' class='empty'>Aucun timbre trouvé.</td></tr>"
+
+    content = f"""<h1>Administration</h1>
+<p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
+<a href="/admin/logout" style="color:#c0392b;font-size:.9rem">Déconnexion</a></p>
+
+<div class="toolbar">
+  <input type="text" id="search" placeholder="Rechercher…" oninput="filtrer()">
+  <select id="f-annee" onchange="recharger()">
+    {opts_a}
+  </select>
+  <select id="f-statut" onchange="recharger()">
+    {opts_s}
+  </select>
+</div>
+
+<div style="overflow-x:auto">
+<table>
+  <thead>
+    <tr>
+      <th>N° Timbre</th>
+      <th>Date achat</th>
+      <th>Statut</th>
+      <th>Dossier / Affaire</th>
+      <th>Code clerc</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="tbody">{rows}</tbody>
+</table>
+</div>
+
+<script>
+function recharger(){{
+  const a=document.getElementById('f-annee').value;
+  const s=document.getElementById('f-statut').value;
+  window.location='/admin?annee='+a+'&statut='+s;
+}}
+function filtrer(){{
+  const q=document.getElementById('search').value.toLowerCase();
+  document.querySelectorAll('tr.adm-row').forEach(function(r){{
+    r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';
+  }});
+}}
+</script>"""
+
+    return render_page("Administration", "admin", content)
+
+
+@app.route("/admin/modifier-dossier", methods=["POST"])
+def admin_modifier_dossier():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+    dossier   = request.form.get("dossier", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+    else:
+        timbre["dossier"] = dossier or None
+        save_timbre(timbre)
+        flash(f"✓ Dossier mis à jour pour le timbre {timbre['numero']}.", "success")
+
+    return redirect(url_for("admin",
+                            annee=request.args.get("annee", "toutes"),
+                            statut=request.args.get("statut", "tous")))
+
+
+@app.route("/admin/remettre-disponible", methods=["POST"])
+def admin_remettre_disponible():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+    else:
+        timbre["statut"]           = "disponible"
+        timbre["dossier"]          = None
+        timbre["date_utilisation"] = None
+        save_timbre(timbre)
+        flash(f"✓ Timbre {timbre['numero']} remis en stock disponible.", "success")
+
+    return redirect(url_for("admin"))
+
+
+@app.route("/admin/supprimer", methods=["POST"])
+def admin_supprimer():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+        return redirect(url_for("admin"))
+
+    # Supprimer le fichier PDF associé
+    if timbre.get("pdf"):
+        pdf_path = PDF_DIR / timbre["pdf"]
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    year = int(timbre["date_achat"][:4])
+    timbres_annee = load_year(year)
+    timbres_annee = [t for t in timbres_annee if t["id"] != timbre_id]
+    save_year(year, timbres_annee)
+    flash(f"✓ Timbre {timbre['numero']} supprimé définitivement.", "success")
+
+    return redirect(url_for("admin"))
 
 
 # ---------------------------------------------------------------------------
