@@ -1,6 +1,5 @@
 @echo off
-chcp 65001 >nul
-title Compilation — Timbres Fiscaux
+title Compilation Timbres Fiscaux
 
 echo.
 echo ============================================================
@@ -9,69 +8,71 @@ echo   Produit : dist\timbres-fiscaux.exe
 echo ============================================================
 echo.
 
-:: ── 1. Vérification Python ──────────────────────────────────
+:: 1. Verification Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo   ERREUR — Python n'est pas trouvé dans le PATH.
+    echo   ERREUR : Python n'est pas trouve dans le PATH.
     echo.
-    echo   Installez Python depuis : https://www.python.org/downloads/
-    echo   IMPORTANT : cochez "Add Python to PATH" pendant l'installation.
+    echo   Installez Python depuis :
+    echo   https://www.python.org/downloads/
+    echo.
+    echo   IMPORTANT : cochez "Add Python to PATH" lors de l'installation.
     echo.
     pause
     exit /b 1
 )
-echo   Python détecté :
+echo   Python detecte :
 python --version
 echo.
 
-:: ── 2. Installation des dépendances ─────────────────────────
-echo   Installation des dépendances (flask, pypdf, openpyxl, pyinstaller)...
+:: 2. Installation des dependances
+echo   Installation des dependances...
+echo   (flask, pypdf, openpyxl, pyinstaller)
 pip install flask pypdf openpyxl pyinstaller --quiet
 if errorlevel 1 (
     echo.
-    echo   ERREUR — L'installation des dépendances a échoué.
-    echo   Vérifiez votre connexion Internet et les droits d'exécution.
+    echo   ERREUR : L'installation des dependances a echoue.
+    echo   Verifiez votre connexion Internet.
     echo.
     pause
     exit /b 1
 )
-echo   Dépendances installées.
+echo   Dependances installees.
 echo.
 
-:: ── 3. Compilation PyInstaller ───────────────────────────────
-echo   Compilation en cours (peut prendre 1-2 minutes)...
+:: 3. Compilation PyInstaller
+echo   Compilation en cours (1-2 minutes)...
 pyinstaller --onefile --noconsole --name timbres-fiscaux app.py
 if errorlevel 1 (
     echo.
-    echo   ERREUR — La compilation PyInstaller a échoué.
-    echo   Consultez les messages ci-dessus pour le détail.
+    echo   ERREUR : La compilation PyInstaller a echoue.
+    echo   Consultez les messages ci-dessus pour le detail.
     echo.
     pause
     exit /b 1
 )
 
-:: ── 4. Succès ────────────────────────────────────────────────
+:: 4. Succes
 echo.
 echo ============================================================
-echo   Compilation réussie !
+echo   Compilation reussie !
 echo ============================================================
 echo.
 echo   Fichier produit : dist\timbres-fiscaux.exe
 echo.
-echo   Étapes suivantes :
-echo   ──────────────────────────────────────────────────────
-echo   1. Copier dist\timbres-fiscaux.exe dans :
+echo   Etapes suivantes :
+echo   ------------------------------------------------------------
+echo   1. Copier dist\timbres-fiscaux.exe vers :
 echo         \\SERVEUR\COMMUN\GESTION-TF\
 echo.
-echo   2. Sur chaque poste utilisateur, créer un raccourci
-echo      bureau vers :
+echo   2. Sur chaque poste, creer un raccourci bureau vers :
 echo         \\SERVEUR\COMMUN\GESTION-TF\timbres-fiscaux.exe
 echo.
 echo   3. Utilisation : double-clic sur le raccourci.
 echo      Le navigateur s'ouvre automatiquement.
 echo.
-echo   4. Les données sont stockées dans :
+echo   4. Les donnees sont dans :
 echo         \\SERVEUR\COMMUN\GESTION-TF\data\
-echo   ──────────────────────────────────────────────────────
+echo   ------------------------------------------------------------
 echo.
 pause
