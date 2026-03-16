@@ -579,12 +579,19 @@ def disponibles():
   <h2>Attribuer ce timbre</h2>
   <form method="post" action="/utiliser">
     <input type="hidden" name="timbre_id" value="{prochain['id']}">
-    <div class="form-row">
-      <label for="dossier">Référence dossier / affaire</label>
-      <input type="text" id="dossier" name="dossier" autofocus required
-             placeholder="Ex. : 2025-042 · Dupont / SCI Les Pins">
+    <div style="display:grid;grid-template-columns:1fr 180px;gap:1rem">
+      <div class="form-row" style="margin-bottom:0">
+        <label for="dossier">Référence dossier / affaire</label>
+        <input type="text" id="dossier" name="dossier" autofocus required
+               placeholder="Ex. : 2025-042 · Dupont / SCI Les Pins">
+      </div>
+      <div class="form-row" style="margin-bottom:0">
+        <label for="code_clerc">Code clerc</label>
+        <input type="text" id="code_clerc" name="code_clerc" required
+               placeholder="Ex. : CL01">
+      </div>
     </div>
-    <button type="submit" class="btn">Attribuer ce timbre</button>
+    <button type="submit" class="btn" style="margin-top:1rem">Attribuer ce timbre</button>
   </form>
 </div>
 {"<p class='note'>📋 " + str(en_attente) + " timbre(s) en attente derrière celui-ci.</p>" if en_attente > 0 else ""}
@@ -606,10 +613,11 @@ def disponibles():
 
 @app.route("/utiliser", methods=["POST"])
 def utiliser():
-    timbre_id = request.form.get("timbre_id", "").strip()
-    dossier   = request.form.get("dossier",   "").strip()
+    timbre_id  = request.form.get("timbre_id",  "").strip()
+    dossier    = request.form.get("dossier",    "").strip()
+    code_clerc = request.form.get("code_clerc", "").strip()
 
-    if not timbre_id or not dossier:
+    if not timbre_id or not dossier or not code_clerc:
         flash("Données manquantes.", "error")
         return redirect(url_for("disponibles"))
 
@@ -626,10 +634,11 @@ def utiliser():
 
     timbre["statut"]           = "utilisé"
     timbre["dossier"]          = dossier
+    timbre["code_clerc"]       = code_clerc
     timbre["date_utilisation"] = date.today().isoformat()
     save_timbre(timbre)
 
-    flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} ».", "success")
+    flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
     return redirect(url_for("telecharger", timbre_id=timbre_id))
 
 
@@ -738,6 +747,7 @@ def historique():
                 f'<tr class="hr">'
                 f'<td class="mono">{t["numero"]}</td>'
                 f'<td>{t.get("dossier") or "—"}</td>'
+                f'<td>{t.get("code_clerc") or "—"}</td>'
                 f'<td>{t.get("date_utilisation") or "—"}</td>'
                 f'<td>{btn_pdf}</td>'
                 f'</tr>'
@@ -750,7 +760,7 @@ def historique():
     <span style="margin-left:auto;font-weight:600">{mt_lot:,.2f} €</span>
   </div>
   <table>
-    <thead><tr><th>N° Timbre</th><th>Dossier / Affaire</th><th>Date utilisation</th><th>PDF</th></tr></thead>
+    <thead><tr><th>N° Timbre</th><th>Dossier / Affaire</th><th>Code clerc</th><th>Date utilisation</th><th>PDF</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
@@ -881,7 +891,7 @@ def export_excel():
         )
         ws = wb.create_sheet(title=str(year))
 
-        headers = ["N° Timbre", "Date achat", "Montant (€)", "Statut", "Dossier", "Date utilisation"]
+        headers = ["N° Timbre", "Date achat", "Montant (€)", "Statut", "Dossier", "Code clerc", "Date utilisation"]
         ws.append(headers)
         for col in range(1, len(headers) + 1):
             c = ws.cell(row=1, column=col)
@@ -896,6 +906,7 @@ def export_excel():
                 t["numero"], t["date_achat"], t["montant"],
                 label,
                 t.get("dossier") or "",
+                t.get("code_clerc") or "",
                 t.get("date_utilisation") or "",
             ])
             r  = ws.max_row
@@ -912,7 +923,7 @@ def export_excel():
                 for col in [1, 2, 3, 5, 6]:
                     ws.cell(row=r, column=col).fill = PatternFill("solid", fgColor="faf9f6")
 
-        for i, w in enumerate([22, 15, 13, 14, 40, 18], 1):
+        for i, w in enumerate([22, 15, 13, 14, 40, 14, 18], 1):
             ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
         ws.row_dimensions[1].height = 22
 
@@ -1050,6 +1061,7 @@ def admin():
   <td>{t['date_achat']}</td>
   <td>{badge}</td>
   <td>{form_dossier}</td>
+  <td>{t.get('code_clerc') or '—'}</td>
   <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
 </tr>"""
 
@@ -1078,6 +1090,7 @@ def admin():
       <th>Date achat</th>
       <th>Statut</th>
       <th>Dossier / Affaire</th>
+      <th>Code clerc</th>
       <th>Actions</th>
     </tr>
   </thead>
