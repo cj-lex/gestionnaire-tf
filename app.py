@@ -26,9 +26,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 # ---------------------------------------------------------------------------
 # Chemins réseau (fixés en dur)
 # ---------------------------------------------------------------------------
-RESEAU_DIR = Path(r"\\SERVEUR\COMMUN\GESTION-TF")
-DATA_DIR   = RESEAU_DIR / "data"
-PDF_DIR    = DATA_DIR   / "pdfs"
+RESEAU_DIR  = Path(r"\\SERVEUR\COMMUN\GESTION-TF")
+DATA_DIR    = RESEAU_DIR / "data"
+PDF_DIR     = DATA_DIR   / "pdfs"
+JUSTIF_DIR  = DATA_DIR   / "justificatifs"
+JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
 
 # ---------------------------------------------------------------------------
 # Constantes
@@ -80,6 +82,20 @@ def load_all() -> list:
     for year in sorted(annees_disponibles()):
         result.extend(load_year(year))
     return result
+
+
+def load_justificatifs() -> list:
+    if not JUSTIF_FILE.exists():
+        return []
+    with open(JUSTIF_FILE, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_justificatifs(data: list):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        with open(JUSTIF_FILE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
 
 
 def save_timbre(timbre: dict):
@@ -298,6 +314,7 @@ select:focus{outline:none;border-color:var(--or)}
     <a href="/" class="{{ 'active' if active=='db' else '' }}">Tableau de bord</a>
     <a href="/disponibles" class="{{ 'active' if active=='dispo' else '' }}">Disponibles</a>
     <a href="/historique" class="{{ 'active' if active=='hist' else '' }}">Historique</a>
+    <a href="/justificatifs" class="{{ 'active' if active=='justif' else '' }}">Justificatifs</a>
   </div>
   <div class="nav-right">
     <a href="/export-excel" class="btn-excel">⬇ Excel</a>
@@ -470,12 +487,25 @@ def import_lot():
         start_idx = len(existing)
 
         PDF_DIR.mkdir(parents=True, exist_ok=True)
+        JUSTIF_DIR.mkdir(parents=True, exist_ok=True)
         nouveaux = []
 
         for i, page in enumerate(reader.pages):
             text   = page.extract_text() or ""
-            # Ignorer la page "Justificatif de paiement à conserver"
+            # Extraire et sauvegarder la page "Justificatif de paiement à conserver"
             if "JUSTIFICATIF DE PAIEMENT" in text.upper():
+                justif_uuid = uuid.uuid4().hex + ".pdf"
+                w = PdfWriter()
+                w.add_page(page)
+                with open(JUSTIF_DIR / justif_uuid, "wb") as fj:
+                    w.write(fj)
+                justifs = load_justificatifs()
+                justifs.append({
+                    "id":         str(uuid.uuid4()),
+                    "date_achat": date_achat,
+                    "pdf":        justif_uuid,
+                })
+                save_justificatifs(justifs)
                 continue
             numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
 
@@ -756,6 +786,67 @@ function filtrer(){{
 </script>"""
 
     return render_page("Historique", "hist", content)
+
+
+# ---------------------------------------------------------------------------
+# PAGE 4 — JUSTIFICATIFS DE PAIEMENT
+# ---------------------------------------------------------------------------
+
+@app.route("/justificatifs")
+def justificatifs():
+    justifs = sorted(load_justificatifs(), key=lambda j: j["date_achat"], reverse=True)
+
+    # Regroupement par date_achat
+    lots: dict[str, list] = {}
+    for j in justifs:
+        lots.setdefault(j["date_achat"], []).append(j)
+
+    blocs = ""
+    for date_a, items in lots.items():
+        rows = ""
+        for idx, j in enumerate(items, 1):
+            pdf_url = url_for("serve_justificatif", filename=j["pdf"])
+            rows += (
+                f'<tr>'
+                f'<td>Justificatif {idx}</td>'
+                f'<td>{date_a}</td>'
+                f'<td style="display:flex;gap:.5rem">'
+                f'<button class="btn" style="padding:.25rem .7rem;font-size:.82rem" '
+                f'onclick="ouvrirPdf(\'{pdf_url}\',\'Justificatif {date_a}\')">📄 Voir</button>'
+                f'<a class="btn" style="padding:.25rem .7rem;font-size:.82rem;text-decoration:none" '
+                f'href="{pdf_url}" download="justificatif-{date_a}.pdf">⬇ Télécharger</a>'
+                f'</td>'
+                f'</tr>'
+            )
+        blocs += f"""
+<div class="lot-block" style="margin-bottom:1.4rem">
+  <div class="lot-header">
+    🧾 Lot du {date_a}
+    <span class="lot-pill">{len(items)} justificatif(s)</span>
+  </div>
+  <table>
+    <thead><tr><th>Document</th><th>Date d'achat</th><th>Actions</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+
+    if not blocs:
+        blocs = "<div class='empty'>Aucun justificatif enregistré. Les prochains imports les ajouteront automatiquement.</div>"
+
+    nb = len(justifs)
+    content = f"""<h1>Justificatifs de paiement</h1>
+<p class="subtitle">{nb} justificatif(s) conservé(s)</p>
+{blocs}"""
+    return render_page("Justificatifs", "justif", content)
+
+
+@app.route("/justificatifs/pdf/<filename>")
+def serve_justificatif(filename: str):
+    # Vérifier que le fichier appartient bien aux justificatifs enregistrés
+    justifs = load_justificatifs()
+    if not any(j["pdf"] == filename for j in justifs):
+        return "Accès refusé.", 403
+    return send_from_directory(str(JUSTIF_DIR), filename, mimetype="application/pdf")
 
 
 # ---------------------------------------------------------------------------
