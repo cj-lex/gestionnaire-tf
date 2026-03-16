@@ -309,7 +309,7 @@ select:focus{outline:none;border-color:var(--or)}
     <div class="alert alert-{{ cat }}">{{ msg }}</div>
   {% endfor %}
 {% endwith %}
-{{ content }}
+{{ content | safe }}
 </main>
 
 <!-- Modal PDF -->
