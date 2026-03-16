@@ -3,8 +3,9 @@ Registre des Timbres Fiscaux — Application Flask
 Étude de commissaire de justice
 
 INTÉGRITÉ DU REGISTRE :
-  AUCUN bouton de suppression ou d'annulation n'est disponible dans l'interface.
-  Ces opérations se font uniquement par édition directe des fichiers JSON.
+  Les opérations sensibles (suppression, annulation, modification) sont
+  accessibles via la page /admin (mot de passe requis).
+  Elles peuvent aussi être effectuées manuellement dans les fichiers JSON :
     - Suppression   : retirer le bloc du timbre dans timbres_{année}.json
                       + supprimer le PDF correspondant dans data/pdfs/
     - Annulation    : remettre statut="disponible", dossier=null,
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from flask import (Flask, flash, make_response, redirect,
                    render_template_string, request, send_from_directory,
-                   url_for)
+                   session, url_for)
 from pypdf import PdfReader, PdfWriter
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -35,8 +36,9 @@ JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
-MONTANT_TIMBRE = 50.0
-SEUIL_ALERTE   = 5
+MONTANT_TIMBRE  = 50.0
+SEUIL_ALERTE    = 5
+ADMIN_PASSWORD  = "csevilla1"
 
 # ---------------------------------------------------------------------------
 # Flask
@@ -315,6 +317,7 @@ select:focus{outline:none;border-color:var(--or)}
     <a href="/disponibles" class="{{ 'active' if active=='dispo' else '' }}">Disponibles</a>
     <a href="/historique" class="{{ 'active' if active=='hist' else '' }}">Historique</a>
     <a href="/justificatifs" class="{{ 'active' if active=='justif' else '' }}">Justificatifs</a>
+    <a href="/admin" class="{{ 'active' if active=='admin' else '' }}">⚙ Administration</a>
   </div>
   <div class="nav-right">
     <a href="/export-excel" class="btn-excel">⬇ Excel</a>
@@ -923,6 +926,250 @@ def export_excel():
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# PAGE 5 — ADMINISTRATION (protégée par mot de passe)
+# ---------------------------------------------------------------------------
+
+def admin_requis():
+    """Retourne une redirection si l'admin n'est pas connecté, None sinon."""
+    if not session.get("admin"):
+        return redirect(url_for("admin_login"))
+    return None
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    erreur = ""
+    if request.method == "POST":
+        if request.form.get("password", "") == ADMIN_PASSWORD:
+            session["admin"] = True
+            return redirect(url_for("admin"))
+        erreur = "Mot de passe incorrect."
+
+    content = f"""
+<div style="max-width:380px;margin:4rem auto">
+  <div class="card">
+    <h2 style="margin-bottom:1.2rem">⚙ Administration</h2>
+    {"<div class='alert alert-error'>" + erreur + "</div>" if erreur else ""}
+    <form method="post">
+      <div class="form-row">
+        <label for="pw">Mot de passe</label>
+        <input type="password" id="pw" name="password" autofocus required
+               placeholder="••••••••" style="max-width:100%">
+      </div>
+      <button type="submit" class="btn" style="width:100%">Accéder</button>
+    </form>
+  </div>
+</div>"""
+    return render_page("Administration", "admin", content)
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin", None)
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/admin")
+def admin():
+    redir = admin_requis()
+    if redir:
+        return redir
+
+    annee_param = request.args.get("annee", "toutes")
+    statut_param = request.args.get("statut", "tous")
+    annees = annees_disponibles()
+
+    if annee_param == "toutes":
+        timbres = load_all()
+    else:
+        try:
+            timbres = load_year(int(annee_param))
+        except ValueError:
+            timbres = load_all()
+            annee_param = "toutes"
+
+    if statut_param == "disponible":
+        timbres = [t for t in timbres if t["statut"] == "disponible"]
+    elif statut_param == "utilisé":
+        timbres = [t for t in timbres if t["statut"] == "utilisé"]
+
+    timbres_sorted = sorted(timbres, key=lambda t: (t["date_achat"], t.get("date_utilisation") or ""), reverse=True)
+
+    # Sélecteur années
+    opts_a = f'<option value="toutes"{"  selected" if annee_param=="toutes" else ""}>Toutes les années</option>\n'
+    for a in annees:
+        sel = " selected" if str(a) == annee_param else ""
+        opts_a += f'<option value="{a}"{sel}>{a}</option>\n'
+
+    opts_s = ""
+    for val, lbl in [("tous","Tous les statuts"),("disponible","Disponibles"),("utilisé","Utilisés")]:
+        sel = " selected" if statut_param == val else ""
+        opts_s += f'<option value="{val}"{sel}>{lbl}</option>\n'
+
+    rows = ""
+    for t in timbres_sorted:
+        badge = (
+            "<span class='badge badge-d'>Disponible</span>"
+            if t["statut"] == "disponible"
+            else "<span class='badge badge-u'>Utilisé</span>"
+        )
+        dossier_val = t.get("dossier") or ""
+        # Formulaire inline modification dossier
+        form_dossier = f"""
+<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;min-width:240px">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <input type="text" name="dossier" value="{dossier_val}"
+         style="flex:1;padding:.3rem .6rem;font-size:.88rem"
+         placeholder="Référence dossier">
+  <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem">✔</button>
+</form>"""
+        # Bouton remettre disponible (si utilisé)
+        btn_reset = ""
+        if t["statut"] == "utilisé":
+            btn_reset = f"""
+<form method="post" action="/admin/remettre-disponible" style="display:inline">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <button type="submit" class="btn"
+          style="padding:.3rem .7rem;font-size:.82rem;background:#27ae60"
+          onclick="return confirm('Remettre ce timbre en stock disponible ?')">↩ Disponible</button>
+</form>"""
+        # Bouton supprimer
+        btn_suppr = f"""
+<form method="post" action="/admin/supprimer" style="display:inline">
+  <input type="hidden" name="timbre_id" value="{t['id']}">
+  <button type="submit" class="btn"
+          style="padding:.3rem .7rem;font-size:.82rem;background:#c0392b;color:#fff"
+          onclick="return confirm('Supprimer définitivement ce timbre ? Cette action est irréversible.')">🗑 Supprimer</button>
+</form>"""
+
+        rows += f"""<tr class="adm-row">
+  <td class="mono">{t['numero']}</td>
+  <td>{t['date_achat']}</td>
+  <td>{badge}</td>
+  <td>{form_dossier}</td>
+  <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
+</tr>"""
+
+    if not rows:
+        rows = "<tr><td colspan='5' class='empty'>Aucun timbre trouvé.</td></tr>"
+
+    content = f"""<h1>Administration</h1>
+<p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
+<a href="/admin/logout" style="color:#c0392b;font-size:.9rem">Déconnexion</a></p>
+
+<div class="toolbar">
+  <input type="text" id="search" placeholder="Rechercher…" oninput="filtrer()">
+  <select id="f-annee" onchange="recharger()">
+    {opts_a}
+  </select>
+  <select id="f-statut" onchange="recharger()">
+    {opts_s}
+  </select>
+</div>
+
+<div style="overflow-x:auto">
+<table>
+  <thead>
+    <tr>
+      <th>N° Timbre</th>
+      <th>Date achat</th>
+      <th>Statut</th>
+      <th>Dossier / Affaire</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="tbody">{rows}</tbody>
+</table>
+</div>
+
+<script>
+function recharger(){{
+  const a=document.getElementById('f-annee').value;
+  const s=document.getElementById('f-statut').value;
+  window.location='/admin?annee='+a+'&statut='+s;
+}}
+function filtrer(){{
+  const q=document.getElementById('search').value.toLowerCase();
+  document.querySelectorAll('tr.adm-row').forEach(function(r){{
+    r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';
+  }});
+}}
+</script>"""
+
+    return render_page("Administration", "admin", content)
+
+
+@app.route("/admin/modifier-dossier", methods=["POST"])
+def admin_modifier_dossier():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+    dossier   = request.form.get("dossier", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+    else:
+        timbre["dossier"] = dossier or None
+        save_timbre(timbre)
+        flash(f"✓ Dossier mis à jour pour le timbre {timbre['numero']}.", "success")
+
+    return redirect(url_for("admin",
+                            annee=request.args.get("annee", "toutes"),
+                            statut=request.args.get("statut", "tous")))
+
+
+@app.route("/admin/remettre-disponible", methods=["POST"])
+def admin_remettre_disponible():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+    else:
+        timbre["statut"]           = "disponible"
+        timbre["dossier"]          = None
+        timbre["date_utilisation"] = None
+        save_timbre(timbre)
+        flash(f"✓ Timbre {timbre['numero']} remis en stock disponible.", "success")
+
+    return redirect(url_for("admin"))
+
+
+@app.route("/admin/supprimer", methods=["POST"])
+def admin_supprimer():
+    if not session.get("admin"):
+        return "Accès refusé.", 403
+    timbre_id = request.form.get("timbre_id", "").strip()
+
+    timbres = load_all()
+    timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
+    if not timbre:
+        flash("Timbre introuvable.", "error")
+        return redirect(url_for("admin"))
+
+    # Supprimer le fichier PDF associé
+    if timbre.get("pdf"):
+        pdf_path = PDF_DIR / timbre["pdf"]
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    year = int(timbre["date_achat"][:4])
+    timbres_annee = load_year(year)
+    timbres_annee = [t for t in timbres_annee if t["id"] != timbre_id]
+    save_year(year, timbres_annee)
+    flash(f"✓ Timbre {timbre['numero']} supprimé définitivement.", "success")
+
+    return redirect(url_for("admin"))
 
 
 # ---------------------------------------------------------------------------
