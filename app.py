@@ -474,6 +474,9 @@ def import_lot():
 
         for i, page in enumerate(reader.pages):
             text   = page.extract_text() or ""
+            # Ignorer la page "Justificatif de paiement à conserver"
+            if "JUSTIFICATIF DE PAIEMENT" in text.upper():
+                continue
             numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
 
             pdf_uuid = uuid.uuid4().hex + ".pdf"
