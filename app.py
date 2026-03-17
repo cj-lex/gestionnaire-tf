@@ -814,8 +814,17 @@ def justificatifs():
     for j in justifs:
         lots.setdefault(j["date_achat"], []).append(j)
 
+    # Comptage des timbres par date d'achat
+    tous_timbres = load_all()
+    timbres_par_date: dict[str, list] = {}
+    for t in tous_timbres:
+        timbres_par_date.setdefault(t["date_achat"], []).append(t)
+
     blocs = ""
     for date_a, items in lots.items():
+        timbres_lot = timbres_par_date.get(date_a, [])
+        nb_timbres  = len(timbres_lot)
+        montant_lot = sum(t["montant"] for t in timbres_lot)
         rows = ""
         for idx, j in enumerate(items, 1):
             pdf_url = url_for("serve_justificatif", filename=j["pdf"])
@@ -823,6 +832,8 @@ def justificatifs():
                 f'<tr>'
                 f'<td>Justificatif {idx}</td>'
                 f'<td>{date_a}</td>'
+                f'<td>{nb_timbres} timbre(s)</td>'
+                f'<td style="font-weight:600">{montant_lot:,.2f} €</td>'
                 f'<td style="display:flex;gap:.5rem">'
                 f'<button class="btn" style="padding:.25rem .7rem;font-size:.82rem" '
                 f'onclick="ouvrirPdf(\'{pdf_url}\',\'Justificatif {date_a}\')">📄 Voir</button>'
@@ -836,9 +847,10 @@ def justificatifs():
   <div class="lot-header">
     🧾 Lot du {date_a}
     <span class="lot-pill">{len(items)} justificatif(s)</span>
+    <span class="lot-pill">{nb_timbres} timbre(s) · {montant_lot:,.2f} €</span>
   </div>
   <table>
-    <thead><tr><th>Document</th><th>Date d'achat</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Document</th><th>Date d'achat</th><th>Nb timbres</th><th>Montant total</th><th>Actions</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
