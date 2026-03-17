@@ -952,26 +952,26 @@ def export_excel():
 
 
 # ---------------------------------------------------------------------------
-# PAGE 5 — ADMINISTRATION (protégée par mot de passe)
+# PAGE 5 — ADMINISTRATION (mot de passe requis à chaque visite)
 # ---------------------------------------------------------------------------
 
-def admin_requis():
-    """Retourne une redirection si l'admin n'est pas connecté, None sinon."""
-    if not session.get("admin"):
-        return redirect(url_for("admin_login"))
-    return None
-
-
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    # Le mot de passe est exigé à chaque chargement de la page.
+    # Un GET efface toujours la session et affiche le formulaire.
+    # Un POST avec le bon mot de passe affiche le contenu admin.
     erreur = ""
-    if request.method == "POST":
-        if request.form.get("password", "") == ADMIN_PASSWORD:
-            session["admin"] = True
-            return redirect(url_for("admin"))
-        erreur = "Mot de passe incorrect."
+    if request.method == "GET":
+        session.pop("admin", None)  # effacer à chaque visite
+    elif request.method == "POST" and "password" in request.form:
+        if request.form["password"] == ADMIN_PASSWORD:
+            session["admin"] = True  # autorise les sous-actions POST
+        else:
+            erreur = "Mot de passe incorrect."
 
-    content = f"""
+    if not session.get("admin") or erreur:
+        session.pop("admin", None)
+        content = f"""
 <div style="max-width:380px;margin:4rem auto">
   <div class="card">
     <h2 style="margin-bottom:1.2rem">⚙ Administration</h2>
@@ -986,20 +986,7 @@ def admin_login():
     </form>
   </div>
 </div>"""
-    return render_page("Administration", "admin", content)
-
-
-@app.route("/admin/logout")
-def admin_logout():
-    session.pop("admin", None)
-    return redirect(url_for("dashboard"))
-
-
-@app.route("/admin")
-def admin():
-    redir = admin_requis()
-    if redir:
-        return redir
+        return render_page("Administration", "admin", content)
 
     annee_param = request.args.get("annee", "toutes")
     statut_param = request.args.get("statut", "tous")
@@ -1039,9 +1026,10 @@ def admin():
             if t["statut"] == "disponible"
             else "<span class='badge badge-u'>Utilisé</span>"
         )
-        dossier_val = t.get("dossier") or ""
-        clerc_val   = t.get("code_clerc") or ""
-        # Formulaire inline : dossier + code clerc (les deux obligatoires)
+        dossier_val  = t.get("dossier") or ""
+        clerc_val    = t.get("code_clerc") or ""
+        date_util    = t.get("date_utilisation") or date.today().isoformat()
+        # Formulaire inline : dossier + code clerc + date utilisation (les deux premiers obligatoires)
         form_attribution = f"""
 <form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;flex-wrap:nowrap;align-items:center">
   <input type="hidden" name="timbre_id" value="{t['id']}">
@@ -1051,6 +1039,8 @@ def admin():
   <input type="text" name="code_clerc" value="{clerc_val}"
          style="flex:1;min-width:55px;padding:.3rem .6rem;font-size:.88rem"
          placeholder="Ex. : JC" required>
+  <input type="date" name="date_utilisation" value="{date_util}"
+         style="padding:.3rem .5rem;font-size:.85rem">
   <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem;white-space:nowrap">✔</button>
 </form>"""
         # Bouton remettre disponible (si utilisé)
@@ -1085,7 +1075,7 @@ def admin():
 
     content = f"""<h1>Administration</h1>
 <p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
-<a href="/admin/logout" style="color:#c0392b;font-size:.9rem">Déconnexion</a></p>
+<a href="/admin/lock" style="color:#c0392b;font-size:.9rem" title="Verrouiller l'administration">🔒 Verrouiller</a></p>
 
 <div class="toolbar">
   <input type="text" id="search" placeholder="Rechercher…" oninput="filtrer()">
@@ -1144,22 +1134,29 @@ def admin_modifier_dossier():
                                 annee=request.args.get("annee", "toutes"),
                                 statut=request.args.get("statut", "tous")))
 
+    date_util  = request.form.get("date_utilisation", "").strip() or date.today().isoformat()
+
     timbres = load_all()
     timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
     if not timbre:
         flash("Timbre introuvable.", "error")
     else:
-        timbre["dossier"]    = dossier
-        timbre["code_clerc"] = code_clerc
-        timbre["statut"]     = "utilisé"
-        if not timbre.get("date_utilisation"):
-            timbre["date_utilisation"] = date.today().isoformat()
+        timbre["dossier"]          = dossier
+        timbre["code_clerc"]       = code_clerc
+        timbre["statut"]           = "utilisé"
+        timbre["date_utilisation"] = date_util
         save_timbre(timbre)
         flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
 
     return redirect(url_for("admin",
                             annee=request.args.get("annee", "toutes"),
                             statut=request.args.get("statut", "tous")))
+
+
+@app.route("/admin/lock")
+def admin_lock():
+    session.pop("admin", None)
+    return redirect(url_for("admin"))
 
 
 @app.route("/admin/remettre-disponible", methods=["POST"])
