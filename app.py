@@ -893,11 +893,17 @@ def historique():
         mt_lot = nb_u * montant
         rows   = ""
         for t in items:
-            btn_pdf = (
-                f'<button class="btn" style="padding:.25rem .7rem;font-size:.82rem" '
-                f'onclick="ouvrirPdf(\'/pdfs/{t["pdf"]}\',\'{t["numero"]}\')">📄 Voir</button>'
-                if t.get("pdf") else "—"
-            )
+            if t.get("pdf"):
+                btn_pdf = (
+                    f'<div style="display:flex;gap:.4rem">'
+                    f'<button class="btn" style="padding:.25rem .7rem;font-size:.82rem" '
+                    f'onclick="ouvrirPdf(\'/pdfs/{t["pdf"]}\',\'{t["numero"]}\')">📄 Voir</button>'
+                    f'<a class="btn" style="padding:.25rem .7rem;font-size:.82rem;text-decoration:none" '
+                    f'href="/pdfs/{t["pdf"]}" download="timbre-{t["numero"]}.pdf">⬇ Télécharger</a>'
+                    f'</div>'
+                )
+            else:
+                btn_pdf = "—"
             rows += (
                 f'<tr class="hr">'
                 f'<td class="mono">{t["numero"]}</td>'
