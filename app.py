@@ -207,6 +207,56 @@ def extraire_numero(text: str) -> str | None:
     return None
 
 
+_MOIS_FR = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
+    "mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
+    "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
+
+
+def extraire_date(text: str) -> str | None:
+    """Extrait une date au format ISO YYYY-MM-DD depuis le texte d'un PDF.
+
+    Reconnaît les formats :
+      - ISO        : 2026-03-17
+      - Français   : 17/03/2026  17-03-2026  17.03.2026
+      - Littéral   : 17 mars 2026
+    Priorité aux dates situées près des mots-clés « paiement », « achat », « émis ».
+    """
+    def _chercher(src: str) -> str | None:
+        # ISO
+        m = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b", src)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        # Français numérique DD/MM/YYYY (séparateur / - .)
+        m = re.search(r"\b(0[1-9]|[12]\d|3[01])[/\-\.](0[1-9]|1[0-2])[/\-\.](20\d{2})\b", src)
+        if m:
+            return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+        # Français littéral : 17 mars 2026
+        m = re.search(
+            r"\b(0?[1-9]|[12]\d|3[01])\s+"
+            r"(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t"
+            r"|septembre|octobre|novembre|d[ée]cembre)\s+(20\d{2})\b",
+            src, re.IGNORECASE,
+        )
+        if m:
+            mois = _MOIS_FR.get(m.group(2).lower().replace("é", "e")
+                                .replace("è", "e").replace("û", "u"), 0)
+            if mois:
+                return f"{m.group(3)}-{str(mois).zfill(2)}-{m.group(1).zfill(2)}"
+        return None
+
+    # Chercher d'abord près des mots-clés caractéristiques
+    for mot in ("paiement", "achat", "émis", "emis", "payé", "paye", "date"):
+        idx = text.lower().find(mot)
+        if idx != -1:
+            d = _chercher(text[max(0, idx - 10): idx + 80])
+            if d:
+                return d
+    # Fallback : première date trouvée dans tout le texte
+    return _chercher(text)
+
+
 # ---------------------------------------------------------------------------
 # Port disponible
 # ---------------------------------------------------------------------------
@@ -516,8 +566,8 @@ def dashboard():
   <h2>Importer un lot de timbres</h2>
   <form method="post" action="/import" enctype="multipart/form-data">
     <div class="form-row">
-      <label for="date_achat">Date d'achat</label>
-      <input type="date" id="date_achat" name="date_achat" value="{today}" required style="max-width:220px">
+      <label for="date_achat">Date d'achat <span style="color:#999;font-size:.88rem;font-weight:400">(auto-détectée depuis le PDF si laissée vide)</span></label>
+      <input type="date" id="date_achat" name="date_achat" value="" style="max-width:220px">
     </div>
     <div class="form-row">
       <label>Fichier PDF du lot</label>
@@ -554,13 +604,32 @@ def import_lot():
     pdf_file   = request.files.get("pdf")
     date_achat = request.form.get("date_achat", "").strip()
 
-    if not pdf_file or not date_achat:
-        flash("Fichier PDF et date d'achat requis.", "error")
+    if not pdf_file:
+        flash("Fichier PDF requis.", "error")
         return redirect(url_for("dashboard"))
 
     try:
-        year   = int(date_achat[:4])
         reader = PdfReader(pdf_file.stream)
+
+        # ── Extraction automatique de la date depuis le justificatif ──────────
+        date_achat_pdf = None
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if "JUSTIFICATIF DE PAIEMENT" in text.upper():
+                date_achat_pdf = extraire_date(text)
+                break  # une seule page justificatif suffit
+
+        # Priorité : date extraite du PDF > date saisie manuellement
+        date_achat_final = date_achat_pdf or date_achat
+        if not date_achat_final:
+            flash("Date d'achat introuvable dans le PDF. Veuillez la saisir manuellement.", "error")
+            return redirect(url_for("dashboard"))
+
+        if date_achat_pdf and date_achat_pdf != date_achat:
+            flash(f"✓ Date d'achat auto-détectée depuis le PDF : {date_achat_pdf}.", "success")
+
+        date_achat = date_achat_final
+        year   = int(date_achat[:4])
         existing  = load_year(year)
         start_idx = len(existing)
 
@@ -1123,19 +1192,24 @@ def admin():
         )
         dossier_val  = t.get("dossier") or ""
         clerc_val    = t.get("code_clerc") or ""
+        date_achat_v = t.get("date_achat") or ""
         date_util    = t.get("date_utilisation") or date.today().isoformat()
-        # Formulaire inline : dossier + code clerc + date utilisation (les deux premiers obligatoires)
+        # Formulaire inline : dossier + code clerc + date achat + date utilisation
         form_attribution = f"""
 <form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.35rem;align-items:center;min-width:0">
   <input type="hidden" name="timbre_id" value="{t['id']}">
   <input type="text" name="dossier" value="{dossier_val}"
-         style="flex:1 1 160px;min-width:0;padding:.3rem .5rem;font-size:.85rem"
+         style="flex:1 1 140px;min-width:0;padding:.3rem .5rem;font-size:.85rem"
          placeholder="Ex. : D250100, R10200" required>
   <input type="text" name="code_clerc" value="{clerc_val}"
-         style="flex:0 0 72px;width:72px;padding:.3rem .5rem;font-size:.85rem"
+         style="flex:0 0 65px;width:65px;padding:.3rem .5rem;font-size:.85rem"
          placeholder="Ex. : JC" required>
+  <input type="date" name="date_achat" value="{date_achat_v}"
+         title="Date d'achat"
+         style="flex:0 0 122px;width:122px;padding:.3rem .4rem;font-size:.82rem">
   <input type="date" name="date_utilisation" value="{date_util}"
-         style="flex:0 0 128px;width:128px;padding:.3rem .4rem;font-size:.82rem">
+         title="Date d'utilisation"
+         style="flex:0 0 122px;width:122px;padding:.3rem .4rem;font-size:.82rem">
   <button type="submit" class="btn" style="flex:0 0 auto;padding:.3rem .6rem;font-size:.82rem">✔</button>
 </form>"""
         # Bouton remettre disponible (si utilisé)
@@ -1161,12 +1235,12 @@ def admin():
   <td class="mono">{t['numero']}</td>
   <td>{t['date_achat']}</td>
   <td>{badge}</td>
-  <td colspan="3">{form_attribution}</td>
+  <td colspan="4">{form_attribution}</td>
   <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
 </tr>"""
 
     if not rows:
-        rows = "<tr><td colspan='7' class='empty'>Aucun timbre trouvé.</td></tr>"
+        rows = "<tr><td colspan='8' class='empty'>Aucun timbre trouvé.</td></tr>"
 
     content = f"""<h1>Administration</h1>
 <p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
@@ -1191,6 +1265,7 @@ def admin():
       <th>Statut</th>
       <th>Dossier / Affaire</th>
       <th>Code clerc</th>
+      <th>Date achat</th>
       <th>Date utilisation</th>
       <th>Actions</th>
     </tr>
@@ -1230,19 +1305,47 @@ def admin_modifier_dossier():
                                 annee=request.args.get("annee", "toutes"),
                                 statut=request.args.get("statut", "tous")))
 
-    date_util  = request.form.get("date_utilisation", "").strip() or date.today().isoformat()
+    date_util      = request.form.get("date_utilisation", "").strip() or date.today().isoformat()
+    date_achat_new = request.form.get("date_achat", "").strip()
 
     timbres = load_all()
     timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
     if not timbre:
         flash("Timbre introuvable.", "error")
     else:
+        year_old       = int(timbre["date_achat"][:4])
+        date_achat_new = date_achat_new or timbre["date_achat"]
+        year_new       = int(date_achat_new[:4])
+
         timbre["dossier"]          = dossier
         timbre["code_clerc"]       = code_clerc
         timbre["statut"]           = "utilisé"
         timbre["date_utilisation"] = date_util
-        save_timbre(timbre)
-        flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
+        timbre["date_achat"]       = date_achat_new
+
+        if year_old != year_new:
+            # Déplacer le fichier PDF vers le sous-dossier de la nouvelle année
+            if timbre.get("pdf"):
+                old_pdf_full = PDF_DIR / timbre["pdf"]
+                new_year_dir = PDF_DIR / str(year_new)
+                new_year_dir.mkdir(parents=True, exist_ok=True)
+                rel, new_pdf_full = _new_pdf_path(new_year_dir, date_achat_new, timbre["numero"])
+                try:
+                    old_pdf_full.rename(new_pdf_full)
+                    timbre["pdf"] = rel
+                except OSError:
+                    pass  # conserver l'ancien chemin si le déplacement échoue
+            # Retirer du fichier JSON de l'ancienne année
+            old_timbres = load_year(year_old)
+            save_year(year_old, [t for t in old_timbres if t["id"] != timbre_id])
+            # Ajouter dans le fichier JSON de la nouvelle année
+            new_timbres = load_year(year_new)
+            new_timbres.append(timbre)
+            save_year(year_new, new_timbres)
+        else:
+            save_timbre(timbre)
+
+        flash(f"✓ Timbre {timbre['numero']} mis à jour (dossier : {dossier}, clerc : {code_clerc}).", "success")
 
     return redirect(url_for("admin",
                             annee=request.args.get("annee", "toutes"),
