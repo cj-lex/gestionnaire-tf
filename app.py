@@ -1031,17 +1031,17 @@ def admin():
         date_util    = t.get("date_utilisation") or date.today().isoformat()
         # Formulaire inline : dossier + code clerc + date utilisation (les deux premiers obligatoires)
         form_attribution = f"""
-<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;flex-wrap:nowrap;align-items:center">
+<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.35rem;align-items:center;min-width:0">
   <input type="hidden" name="timbre_id" value="{t['id']}">
   <input type="text" name="dossier" value="{dossier_val}"
-         style="flex:3;padding:.3rem .6rem;font-size:.88rem"
-         placeholder="Ex. : D250100, R10200, …" required>
+         style="flex:1 1 160px;min-width:0;padding:.3rem .5rem;font-size:.85rem"
+         placeholder="Ex. : D250100, R10200" required>
   <input type="text" name="code_clerc" value="{clerc_val}"
-         style="flex:1;min-width:55px;padding:.3rem .6rem;font-size:.88rem"
+         style="flex:0 0 72px;width:72px;padding:.3rem .5rem;font-size:.85rem"
          placeholder="Ex. : JC" required>
   <input type="date" name="date_utilisation" value="{date_util}"
-         style="padding:.3rem .5rem;font-size:.85rem">
-  <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem;white-space:nowrap">✔</button>
+         style="flex:0 0 128px;width:128px;padding:.3rem .4rem;font-size:.82rem">
+  <button type="submit" class="btn" style="flex:0 0 auto;padding:.3rem .6rem;font-size:.82rem">✔</button>
 </form>"""
         # Bouton remettre disponible (si utilisé)
         btn_reset = ""
@@ -1066,12 +1066,12 @@ def admin():
   <td class="mono">{t['numero']}</td>
   <td>{t['date_achat']}</td>
   <td>{badge}</td>
-  <td colspan="2">{form_attribution}</td>
+  <td colspan="3">{form_attribution}</td>
   <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
 </tr>"""
 
     if not rows:
-        rows = "<tr><td colspan='6' class='empty'>Aucun timbre trouvé.</td></tr>"
+        rows = "<tr><td colspan='7' class='empty'>Aucun timbre trouvé.</td></tr>"
 
     content = f"""<h1>Administration</h1>
 <p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
@@ -1096,6 +1096,7 @@ def admin():
       <th>Statut</th>
       <th>Dossier / Affaire</th>
       <th>Code clerc</th>
+      <th>Date utilisation</th>
       <th>Actions</th>
     </tr>
   </thead>
