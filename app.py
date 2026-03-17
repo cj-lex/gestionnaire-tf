@@ -583,12 +583,12 @@ def disponibles():
       <div class="form-row" style="margin-bottom:0">
         <label for="dossier">Référence dossier / affaire</label>
         <input type="text" id="dossier" name="dossier" autofocus required
-               placeholder="Ex. : 2025-042 · Dupont / SCI Les Pins">
+               placeholder="Ex. : D250100, R10200, …">
       </div>
       <div class="form-row" style="margin-bottom:0">
         <label for="code_clerc">Code clerc</label>
         <input type="text" id="code_clerc" name="code_clerc" required
-               placeholder="Ex. : CL01">
+               placeholder="Ex. : JC, …">
       </div>
     </div>
     <button type="submit" class="btn" style="margin-top:1rem">Attribuer ce timbre</button>
@@ -1028,14 +1028,18 @@ def admin():
             else "<span class='badge badge-u'>Utilisé</span>"
         )
         dossier_val = t.get("dossier") or ""
-        # Formulaire inline modification dossier
-        form_dossier = f"""
-<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;min-width:240px">
+        clerc_val   = t.get("code_clerc") or ""
+        # Formulaire inline : dossier + code clerc (les deux obligatoires)
+        form_attribution = f"""
+<form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.4rem;flex-wrap:nowrap;align-items:center">
   <input type="hidden" name="timbre_id" value="{t['id']}">
   <input type="text" name="dossier" value="{dossier_val}"
-         style="flex:1;padding:.3rem .6rem;font-size:.88rem"
-         placeholder="Référence dossier">
-  <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem">✔</button>
+         style="flex:3;padding:.3rem .6rem;font-size:.88rem"
+         placeholder="Ex. : D250100, R10200, …" required>
+  <input type="text" name="code_clerc" value="{clerc_val}"
+         style="flex:1;min-width:55px;padding:.3rem .6rem;font-size:.88rem"
+         placeholder="Ex. : JC" required>
+  <button type="submit" class="btn" style="padding:.3rem .7rem;font-size:.82rem;white-space:nowrap">✔</button>
 </form>"""
         # Bouton remettre disponible (si utilisé)
         btn_reset = ""
@@ -1060,13 +1064,12 @@ def admin():
   <td class="mono">{t['numero']}</td>
   <td>{t['date_achat']}</td>
   <td>{badge}</td>
-  <td>{form_dossier}</td>
-  <td>{t.get('code_clerc') or '—'}</td>
+  <td colspan="2">{form_attribution}</td>
   <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
 </tr>"""
 
     if not rows:
-        rows = "<tr><td colspan='5' class='empty'>Aucun timbre trouvé.</td></tr>"
+        rows = "<tr><td colspan='6' class='empty'>Aucun timbre trouvé.</td></tr>"
 
     content = f"""<h1>Administration</h1>
 <p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
@@ -1119,17 +1122,28 @@ function filtrer(){{
 def admin_modifier_dossier():
     if not session.get("admin"):
         return "Accès refusé.", 403
-    timbre_id = request.form.get("timbre_id", "").strip()
-    dossier   = request.form.get("dossier", "").strip()
+    timbre_id  = request.form.get("timbre_id",  "").strip()
+    dossier    = request.form.get("dossier",    "").strip()
+    code_clerc = request.form.get("code_clerc", "").strip()
+
+    if not dossier or not code_clerc:
+        flash("La référence dossier et le code clerc sont tous les deux obligatoires.", "error")
+        return redirect(url_for("admin",
+                                annee=request.args.get("annee", "toutes"),
+                                statut=request.args.get("statut", "tous")))
 
     timbres = load_all()
     timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
     if not timbre:
         flash("Timbre introuvable.", "error")
     else:
-        timbre["dossier"] = dossier or None
+        timbre["dossier"]    = dossier
+        timbre["code_clerc"] = code_clerc
+        timbre["statut"]     = "utilisé"
+        if not timbre.get("date_utilisation"):
+            timbre["date_utilisation"] = date.today().isoformat()
         save_timbre(timbre)
-        flash(f"✓ Dossier mis à jour pour le timbre {timbre['numero']}.", "success")
+        flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
 
     return redirect(url_for("admin",
                             annee=request.args.get("annee", "toutes"),
