@@ -18,8 +18,8 @@ from datetime import date
 from pathlib import Path
 
 from flask import (Flask, flash, make_response, redirect,
-                   render_template_string, request, send_from_directory,
-                   session, url_for)
+                   render_template_string, request, send_file,
+                   send_from_directory, session, url_for)
 from pypdf import PdfReader, PdfWriter
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -108,6 +108,81 @@ def save_timbre(timbre: dict):
             timbres[i] = timbre
             break
     save_year(year, timbres)
+
+
+# ---------------------------------------------------------------------------
+# Nommage lisible des fichiers PDF
+# ---------------------------------------------------------------------------
+
+def _sanitize(s: str) -> str:
+    """Rend une chaîne sûre pour un nom de fichier (remplace les caractères spéciaux)."""
+    return re.sub(r"[^\w\-]", "-", s).strip("-")
+
+
+def _new_pdf_path(year_dir: Path, date_achat: str, numero: str) -> tuple[str, Path]:
+    """Retourne (chemin_relatif_depuis_PDF_DIR, chemin_absolu) pour un PDF timbre."""
+    stem  = f"{date_achat}_{_sanitize(numero)}"
+    fname = f"{stem}.pdf"
+    full  = year_dir / fname
+    n = 1
+    while full.exists():
+        fname = f"{stem}_{n}.pdf"
+        full  = year_dir / fname
+        n += 1
+    return f"{year_dir.name}/{fname}", full
+
+
+def _new_justif_path(year_dir: Path, date_achat: str, n: int) -> tuple[str, Path]:
+    """Retourne (chemin_relatif_depuis_JUSTIF_DIR, chemin_absolu) pour un justificatif."""
+    fname = f"{date_achat}_justificatif_{n}.pdf"
+    return f"{year_dir.name}/{fname}", year_dir / fname
+
+
+def migrer_nommage():
+    """Migration one-shot : renomme les anciens PDFs UUID vers le format lisible.
+
+    Les fichiers au format UUID (sans '/' dans le chemin) sont déplacés dans un
+    sous-dossier par année et renommés avec la date et le numéro de timbre.
+    Les fichiers déjà au nouveau format sont ignorés.
+    """
+    # ── Timbres ──────────────────────────────────────────────────────────────
+    for year in annees_disponibles():
+        timbres  = load_year(year)
+        modifie  = False
+        year_dir = PDF_DIR / str(year)
+        for t in timbres:
+            old = t.get("pdf", "")
+            if old and "/" not in old and "\\" not in old:  # format UUID plat
+                old_path = PDF_DIR / old
+                if old_path.exists():
+                    year_dir.mkdir(parents=True, exist_ok=True)
+                    rel, new_path = _new_pdf_path(year_dir, t["date_achat"], t["numero"])
+                    old_path.rename(new_path)
+                    t["pdf"] = rel
+                    modifie  = True
+        if modifie:
+            save_year(year, timbres)
+
+    # ── Justificatifs ────────────────────────────────────────────────────────
+    justifs  = load_justificatifs()
+    modifie  = False
+    compteurs: dict[str, int] = {}
+    for j in justifs:
+        old = j.get("pdf", "")
+        if old and "/" not in old and "\\" not in old:
+            old_path = JUSTIF_DIR / old
+            if old_path.exists():
+                date_a   = j["date_achat"]
+                yr       = int(date_a[:4])
+                year_dir = JUSTIF_DIR / str(yr)
+                year_dir.mkdir(parents=True, exist_ok=True)
+                compteurs[date_a] = compteurs.get(date_a, 0) + 1
+                rel, new_path = _new_justif_path(year_dir, date_a, compteurs[date_a])
+                old_path.rename(new_path)
+                j["pdf"] = rel
+                modifie  = True
+    if modifie:
+        save_justificatifs(justifs)
 
 
 # ---------------------------------------------------------------------------
@@ -486,36 +561,44 @@ def import_lot():
     try:
         year   = int(date_achat[:4])
         reader = PdfReader(pdf_file.stream)
-        existing = load_year(year)
+        existing  = load_year(year)
         start_idx = len(existing)
 
-        PDF_DIR.mkdir(parents=True, exist_ok=True)
-        JUSTIF_DIR.mkdir(parents=True, exist_ok=True)
+        # Sous-dossiers par année
+        year_pdf_dir    = PDF_DIR    / str(year)
+        year_justif_dir = JUSTIF_DIR / str(year)
+        year_pdf_dir.mkdir(parents=True, exist_ok=True)
+        year_justif_dir.mkdir(parents=True, exist_ok=True)
+
+        # Compteur de justificatifs pour cette date (pour le nommage)
+        justif_n = len([j for j in load_justificatifs() if j["date_achat"] == date_achat])
+
         nouveaux = []
 
         for i, page in enumerate(reader.pages):
-            text   = page.extract_text() or ""
+            text = page.extract_text() or ""
             # Extraire et sauvegarder la page "Justificatif de paiement à conserver"
             if "JUSTIFICATIF DE PAIEMENT" in text.upper():
-                justif_uuid = uuid.uuid4().hex + ".pdf"
+                justif_n += 1
+                justif_rel, justif_path = _new_justif_path(year_justif_dir, date_achat, justif_n)
                 w = PdfWriter()
                 w.add_page(page)
-                with open(JUSTIF_DIR / justif_uuid, "wb") as fj:
+                with open(justif_path, "wb") as fj:
                     w.write(fj)
                 justifs = load_justificatifs()
                 justifs.append({
                     "id":         str(uuid.uuid4()),
                     "date_achat": date_achat,
-                    "pdf":        justif_uuid,
+                    "pdf":        justif_rel,
                 })
                 save_justificatifs(justifs)
                 continue
             numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
 
-            pdf_uuid = uuid.uuid4().hex + ".pdf"
-            writer   = PdfWriter()
+            pdf_rel, pdf_path = _new_pdf_path(year_pdf_dir, date_achat, numero)
+            writer = PdfWriter()
             writer.add_page(page)
-            with open(PDF_DIR / pdf_uuid, "wb") as fout:
+            with open(pdf_path, "wb") as fout:
                 writer.write(fout)
 
             nouveaux.append({
@@ -524,7 +607,7 @@ def import_lot():
                 "date_achat":       date_achat,
                 "montant":          MONTANT_TIMBRE,
                 "statut":           "disponible",
-                "pdf":              pdf_uuid,
+                "pdf":              pdf_rel,
                 "dossier":          None,
                 "date_utilisation": None,
             })
@@ -678,13 +761,16 @@ window.onload=function(){{
 # SERVE PDF (protégé : accessible uniquement après attribution)
 # ---------------------------------------------------------------------------
 
-@app.route("/pdfs/<filename>")
+@app.route("/pdfs/<path:filename>")
 def serve_pdf(filename: str):
     timbres = load_all()
     timbre  = next((t for t in timbres if t.get("pdf") == filename), None)
     if not timbre or timbre["statut"] != "utilisé":
         return "Accès refusé.", 403
-    return send_from_directory(str(PDF_DIR), filename, mimetype="application/pdf")
+    full = (PDF_DIR / filename).resolve()
+    if not str(full).startswith(str(PDF_DIR.resolve())):
+        return "Accès refusé.", 403
+    return send_file(str(full), mimetype="application/pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -865,13 +951,15 @@ def justificatifs():
     return render_page("Justificatifs", "justif", content)
 
 
-@app.route("/justificatifs/pdf/<filename>")
+@app.route("/justificatifs/pdf/<path:filename>")
 def serve_justificatif(filename: str):
-    # Vérifier que le fichier appartient bien aux justificatifs enregistrés
     justifs = load_justificatifs()
     if not any(j["pdf"] == filename for j in justifs):
         return "Accès refusé.", 403
-    return send_from_directory(str(JUSTIF_DIR), filename, mimetype="application/pdf")
+    full = (JUSTIF_DIR / filename).resolve()
+    if not str(full).startswith(str(JUSTIF_DIR.resolve())):
+        return "Accès refusé.", 403
+    return send_file(str(full), mimetype="application/pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -962,7 +1050,14 @@ def admin():
     # Un POST avec le bon mot de passe affiche le contenu admin.
     erreur = ""
     if request.method == "GET":
-        session.pop("admin", None)  # effacer à chaque visite
+        # Effacer la session uniquement si l'utilisateur vient d'une page
+        # extérieure à l'administration (navigation "aller-retour").
+        # Si le Referer provient d'une URL admin (après une action interne),
+        # la session est conservée pour éviter de redemander le mot de passe
+        # après chaque modification.
+        referer = request.headers.get("Referer", "")
+        if "/admin" not in referer:
+            session.pop("admin", None)
     elif request.method == "POST" and "password" in request.form:
         if request.form["password"] == ADMIN_PASSWORD:
             session["admin"] = True  # autorise les sous-actions POST
@@ -1231,6 +1326,12 @@ if __name__ == "__main__":
         print()
         input("  Appuyez sur Entrée pour quitter…")
         sys.exit(1)
+
+    # Migration one-shot : renomme les anciens PDFs UUID en noms lisibles
+    try:
+        migrer_nommage()
+    except Exception as exc:
+        print(f"  Avertissement migration nommage : {exc}")
 
     port   = trouver_port(5000)
     url    = f"http://localhost:{port}"
