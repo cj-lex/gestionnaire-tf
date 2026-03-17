@@ -13,8 +13,10 @@ INTÉGRITÉ DU REGISTRE :
   Ne jamais éditer un fichier JSON pendant qu'un import est en cours.
 """
 
-import io, json, os, re, socket, sys, threading, uuid, webbrowser
+import io, json, os, re, socket, ssl, smtplib, sys, threading, uuid, webbrowser
 from datetime import date
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 from flask import (Flask, flash, make_response, redirect,
@@ -39,6 +41,17 @@ JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
 MONTANT_TIMBRE  = 50.0
 SEUIL_ALERTE    = 5
 ADMIN_PASSWORD  = "ACTIA1"
+
+# ---------------------------------------------------------------------------
+# Configuration e-mail (variables d'environnement — voir .env.example)
+# Laisser MAIL_SMTP_HOST vide pour désactiver les notifications.
+# ---------------------------------------------------------------------------
+MAIL_SMTP_HOST = os.getenv("MAIL_SMTP_HOST", "")
+MAIL_SMTP_PORT = int(os.getenv("MAIL_SMTP_PORT", "587"))
+MAIL_USERNAME  = os.getenv("MAIL_USERNAME", "")
+MAIL_PASSWORD  = os.getenv("MAIL_PASSWORD", "")
+MAIL_FROM      = os.getenv("MAIL_FROM", "") or MAIL_USERNAME
+MAIL_TO        = [a.strip() for a in os.getenv("MAIL_TO", "").split(",") if a.strip()]
 
 # ---------------------------------------------------------------------------
 # Flask
@@ -98,6 +111,115 @@ def save_justificatifs(data: list):
     with _lock:
         with open(JUSTIF_FILE, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Notifications e-mail
+# ---------------------------------------------------------------------------
+
+def _stock_stats() -> tuple:
+    """Retourne (nb_dispo, montant_stock, dernier_lot_date, nb_dans_lot, montant_lot)."""
+    timbres   = load_all()
+    dispo     = [t for t in timbres if t["statut"] == "disponible"]
+    nb_dispo  = len(dispo)
+    montant_stock = nb_dispo * MONTANT_TIMBRE
+
+    lots = {}
+    for t in timbres:
+        d = t.get("date_achat") or ""
+        lots.setdefault(d, []).append(t)
+
+    if lots:
+        dernier_lot_date = max(lots.keys())
+        nb_dans_lot      = len(lots[dernier_lot_date])
+        montant_lot      = nb_dans_lot * MONTANT_TIMBRE
+    else:
+        dernier_lot_date, nb_dans_lot, montant_lot = "—", 0, 0.0
+
+    return nb_dispo, montant_stock, dernier_lot_date, nb_dans_lot, montant_lot
+
+
+def _envoyer_notification(timbre: dict):
+    """Envoie l'e-mail de notification d'attribution (appel en thread background)."""
+    if not MAIL_SMTP_HOST or not MAIL_TO:
+        return
+
+    try:
+        nb_dispo, montant_stock, dernier_lot_date, nb_dans_lot, montant_lot = _stock_stats()
+
+        numero     = timbre.get("numero", "?")
+        dossier    = timbre.get("dossier") or "—"
+        clerc      = timbre.get("code_clerc") or "—"
+        date_util  = timbre.get("date_utilisation") or date.today().isoformat()
+
+        sujet = f"[Timbres] Timbre {numero} attribué — Dossier {dossier}"
+
+        corps_html = f"""\
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"></head>
+<body style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:520px;margin:0 auto">
+  <h2 style="border-bottom:2px solid #0d6efd;padding-bottom:.4rem;color:#0d6efd">
+    Timbre fiscal attribué
+  </h2>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:1.2rem">
+    <tr><td style="padding:.4rem .6rem;font-weight:600;width:45%">N° Timbre</td>
+        <td style="padding:.4rem .6rem;font-family:monospace">{numero}</td></tr>
+    <tr style="background:#f5f7fa">
+        <td style="padding:.4rem .6rem;font-weight:600">Dossier / Affaire</td>
+        <td style="padding:.4rem .6rem">{dossier}</td></tr>
+    <tr><td style="padding:.4rem .6rem;font-weight:600">Code clerc</td>
+        <td style="padding:.4rem .6rem">{clerc}</td></tr>
+    <tr style="background:#f5f7fa">
+        <td style="padding:.4rem .6rem;font-weight:600">Date d'utilisation</td>
+        <td style="padding:.4rem .6rem">{date_util}</td></tr>
+  </table>
+
+  <h3 style="color:#555;margin-bottom:.5rem">État du stock</h3>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:1.2rem">
+    <tr><td style="padding:.4rem .6rem;font-weight:600;width:45%">Timbres disponibles</td>
+        <td style="padding:.4rem .6rem">{nb_dispo} timbre(s)</td></tr>
+    <tr style="background:#f5f7fa">
+        <td style="padding:.4rem .6rem;font-weight:600">Valeur du stock restant</td>
+        <td style="padding:.4rem .6rem;font-weight:600">{montant_stock:,.2f} €</td></tr>
+  </table>
+
+  <h3 style="color:#555;margin-bottom:.5rem">Dernier lot acheté</h3>
+  <table style="width:100%;border-collapse:collapse">
+    <tr><td style="padding:.4rem .6rem;font-weight:600;width:45%">Date d'achat</td>
+        <td style="padding:.4rem .6rem">{dernier_lot_date}</td></tr>
+    <tr style="background:#f5f7fa">
+        <td style="padding:.4rem .6rem;font-weight:600">Timbres dans le lot</td>
+        <td style="padding:.4rem .6rem">{nb_dans_lot}</td></tr>
+    <tr><td style="padding:.4rem .6rem;font-weight:600">Montant du lot</td>
+        <td style="padding:.4rem .6rem;font-weight:600">{montant_lot:,.2f} €</td></tr>
+  </table>
+  <p style="font-size:12px;color:#999;margin-top:2rem">
+    Notification automatique — Registre des Timbres Fiscaux
+  </p>
+</body>
+</html>"""
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = sujet
+        msg["From"]    = MAIL_FROM
+        msg["To"]      = ", ".join(MAIL_TO)
+        msg.attach(MIMEText(corps_html, "html", "utf-8"))
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP(MAIL_SMTP_HOST, MAIL_SMTP_PORT) as srv:
+            srv.ehlo()
+            srv.starttls(context=context)
+            srv.login(MAIL_USERNAME, MAIL_PASSWORD)
+            srv.sendmail(MAIL_FROM, MAIL_TO, msg.as_bytes())
+    except Exception as exc:
+        # Ne jamais bloquer l'attribution si l'e-mail échoue
+        print(f"[MAIL] Échec de l'envoi : {exc}", file=sys.stderr)
+
+
+def notifier_attribution(timbre: dict):
+    """Lance l'envoi de notification en arrière-plan."""
+    threading.Thread(target=_envoyer_notification, args=(timbre,), daemon=True).start()
 
 
 def save_timbre(timbre: dict):
@@ -789,6 +911,7 @@ def utiliser():
     timbre["code_clerc"]       = code_clerc
     timbre["date_utilisation"] = date.today().isoformat()
     save_timbre(timbre)
+    notifier_attribution(timbre)
 
     flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
     return redirect(url_for("telecharger", timbre_id=timbre_id))
@@ -1351,6 +1474,7 @@ def admin_modifier_dossier():
         else:
             save_timbre(timbre)
 
+        notifier_attribution(timbre)
         flash(f"✓ Timbre {timbre['numero']} mis à jour (dossier : {dossier}, clerc : {code_clerc}).", "success")
 
     return redirect(url_for("admin",
