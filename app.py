@@ -38,7 +38,7 @@ JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
 # ---------------------------------------------------------------------------
 MONTANT_TIMBRE  = 50.0
 SEUIL_ALERTE    = 5
-ADMIN_PASSWORD  = "csevilla1"
+ADMIN_PASSWORD  = "actiajuris1"
 
 # ---------------------------------------------------------------------------
 # Flask
