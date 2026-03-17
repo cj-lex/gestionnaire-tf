@@ -1050,7 +1050,14 @@ def admin():
     # Un POST avec le bon mot de passe affiche le contenu admin.
     erreur = ""
     if request.method == "GET":
-        session.pop("admin", None)  # effacer à chaque visite
+        # Effacer la session uniquement si l'utilisateur vient d'une page
+        # extérieure à l'administration (navigation "aller-retour").
+        # Si le Referer provient d'une URL admin (après une action interne),
+        # la session est conservée pour éviter de redemander le mot de passe
+        # après chaque modification.
+        referer = request.headers.get("Referer", "")
+        if "/admin" not in referer:
+            session.pop("admin", None)
     elif request.method == "POST" and "password" in request.form:
         if request.form["password"] == ADMIN_PASSWORD:
             session["admin"] = True  # autorise les sous-actions POST
