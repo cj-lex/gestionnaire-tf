@@ -1192,19 +1192,24 @@ def admin():
         )
         dossier_val  = t.get("dossier") or ""
         clerc_val    = t.get("code_clerc") or ""
+        date_achat_v = t.get("date_achat") or ""
         date_util    = t.get("date_utilisation") or date.today().isoformat()
-        # Formulaire inline : dossier + code clerc + date utilisation (les deux premiers obligatoires)
+        # Formulaire inline : dossier + code clerc + date achat + date utilisation
         form_attribution = f"""
 <form method="post" action="/admin/modifier-dossier" style="display:flex;gap:.35rem;align-items:center;min-width:0">
   <input type="hidden" name="timbre_id" value="{t['id']}">
   <input type="text" name="dossier" value="{dossier_val}"
-         style="flex:1 1 160px;min-width:0;padding:.3rem .5rem;font-size:.85rem"
+         style="flex:1 1 140px;min-width:0;padding:.3rem .5rem;font-size:.85rem"
          placeholder="Ex. : D250100, R10200" required>
   <input type="text" name="code_clerc" value="{clerc_val}"
-         style="flex:0 0 72px;width:72px;padding:.3rem .5rem;font-size:.85rem"
+         style="flex:0 0 65px;width:65px;padding:.3rem .5rem;font-size:.85rem"
          placeholder="Ex. : JC" required>
+  <input type="date" name="date_achat" value="{date_achat_v}"
+         title="Date d'achat"
+         style="flex:0 0 122px;width:122px;padding:.3rem .4rem;font-size:.82rem">
   <input type="date" name="date_utilisation" value="{date_util}"
-         style="flex:0 0 128px;width:128px;padding:.3rem .4rem;font-size:.82rem">
+         title="Date d'utilisation"
+         style="flex:0 0 122px;width:122px;padding:.3rem .4rem;font-size:.82rem">
   <button type="submit" class="btn" style="flex:0 0 auto;padding:.3rem .6rem;font-size:.82rem">✔</button>
 </form>"""
         # Bouton remettre disponible (si utilisé)
@@ -1230,12 +1235,12 @@ def admin():
   <td class="mono">{t['numero']}</td>
   <td>{t['date_achat']}</td>
   <td>{badge}</td>
-  <td colspan="3">{form_attribution}</td>
+  <td colspan="4">{form_attribution}</td>
   <td style="white-space:nowrap">{btn_reset} {btn_suppr}</td>
 </tr>"""
 
     if not rows:
-        rows = "<tr><td colspan='7' class='empty'>Aucun timbre trouvé.</td></tr>"
+        rows = "<tr><td colspan='8' class='empty'>Aucun timbre trouvé.</td></tr>"
 
     content = f"""<h1>Administration</h1>
 <p class="subtitle">{len(timbres_sorted)} timbre(s) affiché(s) &nbsp;·&nbsp;
@@ -1260,6 +1265,7 @@ def admin():
       <th>Statut</th>
       <th>Dossier / Affaire</th>
       <th>Code clerc</th>
+      <th>Date achat</th>
       <th>Date utilisation</th>
       <th>Actions</th>
     </tr>
@@ -1299,19 +1305,47 @@ def admin_modifier_dossier():
                                 annee=request.args.get("annee", "toutes"),
                                 statut=request.args.get("statut", "tous")))
 
-    date_util  = request.form.get("date_utilisation", "").strip() or date.today().isoformat()
+    date_util      = request.form.get("date_utilisation", "").strip() or date.today().isoformat()
+    date_achat_new = request.form.get("date_achat", "").strip()
 
     timbres = load_all()
     timbre  = next((t for t in timbres if t["id"] == timbre_id), None)
     if not timbre:
         flash("Timbre introuvable.", "error")
     else:
+        year_old       = int(timbre["date_achat"][:4])
+        date_achat_new = date_achat_new or timbre["date_achat"]
+        year_new       = int(date_achat_new[:4])
+
         timbre["dossier"]          = dossier
         timbre["code_clerc"]       = code_clerc
         timbre["statut"]           = "utilisé"
         timbre["date_utilisation"] = date_util
-        save_timbre(timbre)
-        flash(f"✓ Timbre {timbre['numero']} attribué au dossier « {dossier} » (clerc : {code_clerc}).", "success")
+        timbre["date_achat"]       = date_achat_new
+
+        if year_old != year_new:
+            # Déplacer le fichier PDF vers le sous-dossier de la nouvelle année
+            if timbre.get("pdf"):
+                old_pdf_full = PDF_DIR / timbre["pdf"]
+                new_year_dir = PDF_DIR / str(year_new)
+                new_year_dir.mkdir(parents=True, exist_ok=True)
+                rel, new_pdf_full = _new_pdf_path(new_year_dir, date_achat_new, timbre["numero"])
+                try:
+                    old_pdf_full.rename(new_pdf_full)
+                    timbre["pdf"] = rel
+                except OSError:
+                    pass  # conserver l'ancien chemin si le déplacement échoue
+            # Retirer du fichier JSON de l'ancienne année
+            old_timbres = load_year(year_old)
+            save_year(year_old, [t for t in old_timbres if t["id"] != timbre_id])
+            # Ajouter dans le fichier JSON de la nouvelle année
+            new_timbres = load_year(year_new)
+            new_timbres.append(timbre)
+            save_year(year_new, new_timbres)
+        else:
+            save_timbre(timbre)
+
+        flash(f"✓ Timbre {timbre['numero']} mis à jour (dossier : {dossier}, clerc : {code_clerc}).", "success")
 
     return redirect(url_for("admin",
                             annee=request.args.get("annee", "toutes"),
