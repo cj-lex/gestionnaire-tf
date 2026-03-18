@@ -663,7 +663,9 @@ def import_lot():
                 })
                 save_justificatifs(justifs)
                 continue
-            numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
+            numero = extraire_numero(text)
+            if not numero:
+                continue  # page sans numéro de timbre reconnu (couverture, récap…)
 
             pdf_rel, pdf_path = _new_pdf_path(year_pdf_dir, date_achat, numero)
             writer = PdfWriter()
