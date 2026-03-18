@@ -643,27 +643,43 @@ def import_lot():
         # Compteur de justificatifs pour cette date (pour le nommage)
         justif_n = len([j for j in load_justificatifs() if j["date_achat"] == date_achat])
 
-        nouveaux = []
+        nouveaux      = []
+        justif_writer = None  # PdfWriter en cours pour le justificatif multi-pages
 
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            # Extraire et sauvegarder la page "Justificatif de paiement à conserver"
+        def _finaliser_justificatif():
+            nonlocal justif_n, justif_writer
+            if justif_writer is None:
+                return
+            justif_n += 1
+            justif_rel, justif_path = _new_justif_path(year_justif_dir, date_achat, justif_n)
+            with open(justif_path, "wb") as fj:
+                justif_writer.write(fj)
+            justifs = load_justificatifs()
+            justifs.append({"id": str(uuid.uuid4()), "date_achat": date_achat, "pdf": justif_rel})
+            save_justificatifs(justifs)
+            justif_writer = None
+
+        for page in reader.pages:
+            text   = page.extract_text() or ""
+            numero = extraire_numero(text)
+
             if "JUSTIFICATIF DE PAIEMENT" in text.upper():
-                justif_n += 1
-                justif_rel, justif_path = _new_justif_path(year_justif_dir, date_achat, justif_n)
-                w = PdfWriter()
-                w.add_page(page)
-                with open(justif_path, "wb") as fj:
-                    w.write(fj)
-                justifs = load_justificatifs()
-                justifs.append({
-                    "id":         str(uuid.uuid4()),
-                    "date_achat": date_achat,
-                    "pdf":        justif_rel,
-                })
-                save_justificatifs(justifs)
+                # Première page du justificatif : ouvre un nouveau PdfWriter
+                _finaliser_justificatif()
+                justif_writer = PdfWriter()
+                justif_writer.add_page(page)
                 continue
-            numero = extraire_numero(text) or f"TIMBRE-{date_achat}-{start_idx + i + 1:03d}"
+
+            if justif_writer is not None and not numero:
+                # Page suivante sans numéro → suite du justificatif multi-pages
+                justif_writer.add_page(page)
+                continue
+
+            # Page de timbre ou page parasite sans numéro
+            _finaliser_justificatif()
+
+            if not numero:
+                continue  # page sans numéro de timbre reconnu (couverture, récap…)
 
             pdf_rel, pdf_path = _new_pdf_path(year_pdf_dir, date_achat, numero)
             writer = PdfWriter()
@@ -681,6 +697,8 @@ def import_lot():
                 "dossier":          None,
                 "date_utilisation": None,
             })
+
+        _finaliser_justificatif()  # justificatif en fin de PDF
 
         existing.extend(nouveaux)
         save_year(year, existing)
