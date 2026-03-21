@@ -32,20 +32,39 @@ DATA_DIR    = RESEAU_DIR / "data"
 PDF_DIR     = DATA_DIR   / "pdfs"
 JUSTIF_DIR  = DATA_DIR   / "justificatifs"
 JUSTIF_FILE = DATA_DIR   / "justificatifs.json"
+AUDIT_FILE  = DATA_DIR   / "audit.log"
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
 MONTANT_TIMBRE  = 50.0
 SEUIL_ALERTE    = 5
-ADMIN_PASSWORD  = "ACTIA1"
+
+# Mot de passe admin : priorité variable d'environnement ADMIN_PASSWORD,
+# puis fichier config.json dans le répertoire réseau, puis valeur par défaut.
+def _charger_admin_password() -> str:
+    env_pw = os.getenv("ADMIN_PASSWORD", "")
+    if env_pw:
+        return env_pw
+    config_file = RESEAU_DIR / "config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r", encoding="utf-8") as fh:
+                cfg = json.load(fh)
+                if cfg.get("admin_password"):
+                    return cfg["admin_password"]
+        except Exception:
+            pass
+    return "ACTIA1"  # valeur par défaut si aucune configuration trouvée
+
+ADMIN_PASSWORD = _charger_admin_password()
 
 # ---------------------------------------------------------------------------
 # Flask
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = "timbre-fiscal-etude-2025-xK9m"
-_lock = threading.Lock()
+_lock = threading.RLock()  # RLock : réentrant, évite les deadlocks lors des appels imbriqués
 
 # ---------------------------------------------------------------------------
 # Couche données year-aware
@@ -57,10 +76,15 @@ def data_file(year: int) -> Path:
 
 def load_year(year: int) -> list:
     f = data_file(year)
-    if not f.exists():
-        return []
-    with open(f, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    with _lock:
+        if not f.exists():
+            return []
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[DONNÉES] Erreur lecture {f}: {exc}", file=sys.stderr)
+            return []
 
 
 def save_year(year: int, data: list):
@@ -87,10 +111,15 @@ def load_all() -> list:
 
 
 def load_justificatifs() -> list:
-    if not JUSTIF_FILE.exists():
-        return []
-    with open(JUSTIF_FILE, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    with _lock:
+        if not JUSTIF_FILE.exists():
+            return []
+        try:
+            with open(JUSTIF_FILE, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[DONNÉES] Erreur lecture justificatifs: {exc}", file=sys.stderr)
+            return []
 
 
 def save_justificatifs(data: list):
@@ -445,9 +474,33 @@ select:focus{outline:none;border-color:var(--or)}
     <a href="/justificatifs" class="{{ 'active' if active=='justif' else '' }}">Justificatifs</a>
     <a href="/admin" class="{{ 'active' if active=='admin' else '' }}">⚙ Administration</a>
   </div>
-  <div class="nav-right">
-    <a href="/export-excel" class="btn-excel">⬇ Excel</a>
+  <div class="nav-right" style="position:relative">
+    <button class="btn-excel" id="excel-toggle" type="button">⬇ Excel ▾</button>
+    <div id="excel-menu" style="display:none;position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:.7rem 1rem;min-width:220px;z-index:200">
+      <div style="font-size:.82rem;color:#888;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.05em">Filtres export</div>
+      <form action="/export-excel" method="get">
+        <select name="annee" style="width:100%;margin-bottom:.5rem;font-size:.9rem">
+          <option value="">Toutes les années</option>
+          {% for a in annees %}<option value="{{ a }}">{{ a }}</option>{% endfor %}
+        </select>
+        <select name="statut" style="width:100%;margin-bottom:.7rem;font-size:.9rem">
+          <option value="">Tous les statuts</option>
+          <option value="disponible">Disponibles</option>
+          <option value="utilisé">Utilisés</option>
+        </select>
+        <button type="submit" class="btn" style="width:100%;font-size:.9rem">⬇ Télécharger</button>
+      </form>
+    </div>
   </div>
+  <script>
+  (function(){
+    var btn=document.getElementById('excel-toggle');
+    var menu=document.getElementById('excel-menu');
+    btn.addEventListener('click',function(e){e.stopPropagation();menu.style.display=menu.style.display==='none'?'block':'none';});
+    document.addEventListener('click',function(){menu.style.display='none';});
+    menu.addEventListener('click',function(e){e.stopPropagation();});
+  })();
+  </script>
 </nav>
 <main>
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -495,7 +548,10 @@ document.addEventListener('keydown', function(e) {
 
 
 def render_page(title: str, active: str, content: str) -> str:
-    return render_template_string(_BASE, title=title, active=active, content=content)
+    return render_template_string(
+        _BASE, title=title, active=active, content=content,
+        annees=annees_disponibles(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +758,7 @@ def import_lot():
 
         existing.extend(nouveaux)
         save_year(year, existing)
+        audit("IMPORT", f"{len(nouveaux)} timbre(s) importé(s) — date_achat={date_achat}")
         flash(f"✓ {len(nouveaux)} timbre(s) importé(s) avec succès ({year}).", "success")
 
     except Exception as exc:
@@ -782,6 +839,28 @@ def disponibles():
 # ATTRIBUTION
 # ---------------------------------------------------------------------------
 
+def _valider_dossier(dossier: str) -> str | None:
+    """Retourne un message d'erreur si le dossier est invalide, sinon None."""
+    if not dossier:
+        return "La référence dossier est obligatoire."
+    if len(dossier) > 100:
+        return "La référence dossier ne peut pas dépasser 100 caractères."
+    if not re.match(r'^[\w\s\-\./,()]+$', dossier):
+        return "La référence dossier contient des caractères non autorisés."
+    return None
+
+
+def _valider_code_clerc(code: str) -> str | None:
+    """Retourne un message d'erreur si le code clerc est invalide, sinon None."""
+    if not code:
+        return "Le code clerc est obligatoire."
+    if len(code) > 20:
+        return "Le code clerc ne peut pas dépasser 20 caractères."
+    if not re.match(r'^[A-Za-z0-9\-]+$', code):
+        return "Le code clerc ne doit contenir que des lettres, chiffres ou tirets."
+    return None
+
+
 @app.route("/utiliser", methods=["POST"])
 def utiliser():
     timbre_id  = request.form.get("timbre_id",  "").strip()
@@ -790,6 +869,11 @@ def utiliser():
 
     if not timbre_id or not dossier or not code_clerc:
         flash("Données manquantes.", "error")
+        return redirect(url_for("disponibles"))
+
+    err = _valider_dossier(dossier) or _valider_code_clerc(code_clerc)
+    if err:
+        flash(err, "error")
         return redirect(url_for("disponibles"))
 
     timbres = load_all()
@@ -865,9 +949,16 @@ def serve_pdf(filename: str):
 # PAGE 3 — HISTORIQUE
 # ---------------------------------------------------------------------------
 
+LOTS_PAR_PAGE = 20
+
+
 @app.route("/historique")
 def historique():
     annee_param = request.args.get("annee", "toutes")
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
     annees      = annees_disponibles()
 
     if annee_param == "toutes":
@@ -898,15 +989,22 @@ def historique():
     mt_total   = nb_total * MONTANT_TIMBRE
     nb_lots    = len(lots)
 
+    # Pagination
+    nb_pages   = max(1, (nb_lots + LOTS_PAR_PAGE - 1) // LOTS_PAR_PAGE)
+    page       = min(page, nb_pages)
+    debut      = (page - 1) * LOTS_PAR_PAGE
+    fin        = debut + LOTS_PAR_PAGE
+    lots_page  = lots_sorted[debut:fin]
+
     # Sélecteur années
     opts  = f'<option value="toutes"{"  selected" if annee_param=="toutes" else ""}>Toutes les années</option>\n'
     for a in annees:
         sel   = ' selected' if str(a) == annee_param else ""
         opts += f'<option value="{a}"{sel}>{a}</option>\n'
 
-    # Blocs de lots
+    # Blocs de lots (page courante uniquement)
     blocs = ""
-    for (date_a, montant), items in lots_sorted:
+    for (date_a, montant), items in lots_page:
         nb_u   = len(items)
         tot    = total_lot(date_a, montant)
         mt_lot = nb_u * montant
@@ -949,6 +1047,24 @@ def historique():
         sfx   = f" pour {annee_param}" if annee_param != "toutes" else ""
         blocs = f"<div class='empty'>Aucun timbre utilisé{sfx}.</div>"
 
+    # Navigation pagination
+    def _lien_page(p):
+        return f"/historique?annee={annee_param}&page={p}"
+
+    nav_pages = ""
+    if nb_pages > 1:
+        prev_btn = (
+            f'<a href="{_lien_page(page-1)}" class="btn" style="padding:.35rem .8rem;font-size:.9rem;text-decoration:none">‹ Précédent</a>'
+            if page > 1 else
+            '<span class="btn" style="padding:.35rem .8rem;font-size:.9rem;opacity:.4;cursor:default">‹ Précédent</span>'
+        )
+        next_btn = (
+            f'<a href="{_lien_page(page+1)}" class="btn" style="padding:.35rem .8rem;font-size:.9rem;text-decoration:none">Suivant ›</a>'
+            if page < nb_pages else
+            '<span class="btn" style="padding:.35rem .8rem;font-size:.9rem;opacity:.4;cursor:default">Suivant ›</span>'
+        )
+        nav_pages = f'<div style="display:flex;align-items:center;gap:1rem;margin-top:1.2rem">{prev_btn}<span style="color:#666;font-size:.92rem">Page {page} / {nb_pages}</span>{next_btn}</div>'
+
     subtitle = f"{nb_total} timbre(s) utilisé(s) sur {nb_lots} lot(s) — total : {mt_total:,.2f} €"
 
     content = f"""<h1>Historique des attributions</h1>
@@ -962,6 +1078,7 @@ def historique():
 </div>
 
 {blocs}
+{nav_pages}
 
 <script>
 function filtrer(){{
@@ -1062,9 +1179,25 @@ def serve_justificatif(filename: str):
 
 @app.route("/export-excel")
 def export_excel():
+    # Filtres optionnels : ?annee=2025&statut=utilisé
+    filtre_annee  = request.args.get("annee", "").strip()
+    filtre_statut = request.args.get("statut", "").strip().lower()
+
     annees = annees_disponibles()
     if not annees:
         flash("Aucune donnée à exporter.", "error")
+        return redirect(url_for("dashboard"))
+
+    # Restreindre aux années filtrées
+    if filtre_annee:
+        try:
+            annee_int = int(filtre_annee)
+            annees = [a for a in annees if a == annee_int]
+        except ValueError:
+            pass
+
+    if not annees:
+        flash(f"Aucune donnée pour l'année {filtre_annee}.", "error")
         return redirect(url_for("dashboard"))
 
     marine_hex = "1a2744"
@@ -1079,10 +1212,13 @@ def export_excel():
     wb.remove(wb.active)  # supprimer l'onglet vide par défaut
 
     for year in sorted(annees, reverse=True):
-        timbres = sorted(
-            load_year(year),
-            key=lambda t: (t["statut"], t["date_achat"])
-        )
+        timbres_brut = load_year(year)
+        # Appliquer le filtre statut si demandé
+        if filtre_statut in ("disponible", "utilisé"):
+            timbres_brut = [t for t in timbres_brut if t["statut"] == filtre_statut]
+        timbres = sorted(timbres_brut, key=lambda t: (t["statut"], t["date_achat"]))
+        if not timbres:
+            continue
         ws = wb.create_sheet(title=str(year))
 
         headers = ["N° Timbre", "Date achat", "Montant (€)", "Statut", "Dossier", "Code clerc", "Date utilisation"]
@@ -1121,10 +1257,16 @@ def export_excel():
             ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
         ws.row_dimensions[1].height = 22
 
+    if not wb.sheetnames:
+        flash("Aucune donnée à exporter avec les filtres sélectionnés.", "error")
+        return redirect(url_for("dashboard"))
+
     buf      = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    fname    = f"timbres-fiscaux-{date.today()}.xlsx"
+    suffixe  = f"-{filtre_annee}" if filtre_annee else ""
+    suffixe += f"-{filtre_statut}" if filtre_statut else ""
+    fname    = f"timbres-fiscaux{suffixe}-{date.today()}.xlsx"
     response = make_response(buf.read())
     response.headers["Content-Disposition"] = f'attachment; filename="{fname}"'
     response.headers["Content-Type"] = (
@@ -1324,8 +1466,9 @@ def admin_modifier_dossier():
     dossier    = request.form.get("dossier",    "").strip()
     code_clerc = request.form.get("code_clerc", "").strip()
 
-    if not dossier or not code_clerc:
-        flash("La référence dossier et le code clerc sont tous les deux obligatoires.", "error")
+    err = _valider_dossier(dossier) or _valider_code_clerc(code_clerc)
+    if err:
+        flash(err, "error")
         return redirect(url_for("admin",
                                 annee=request.args.get("annee", "toutes"),
                                 statut=request.args.get("statut", "tous")))
@@ -1358,8 +1501,13 @@ def admin_modifier_dossier():
                 try:
                     old_pdf_full.rename(new_pdf_full)
                     timbre["pdf"] = rel
-                except OSError:
-                    pass  # conserver l'ancien chemin si le déplacement échoue
+                except OSError as exc:
+                    print(f"[PDF] Impossible de déplacer {old_pdf_full} → {new_pdf_full} : {exc}", file=sys.stderr)
+                    flash(
+                        f"Attention : le fichier PDF du timbre {timbre['numero']} n'a pas pu être "
+                        f"déplacé vers l'année {year_new}. Veuillez le déplacer manuellement.",
+                        "danger",
+                    )
             # Retirer du fichier JSON de l'ancienne année
             old_timbres = load_year(year_old)
             save_year(year_old, [t for t in old_timbres if t["id"] != timbre_id])
@@ -1398,6 +1546,7 @@ def admin_remettre_disponible():
         timbre["dossier"]          = None
         timbre["date_utilisation"] = None
         save_timbre(timbre)
+        audit("ADMIN_RESET", f"timbre={timbre['numero']} remis disponible")
         flash(f"✓ Timbre {timbre['numero']} remis en stock disponible.", "success")
 
     return redirect(url_for("admin"))
@@ -1427,6 +1576,7 @@ def admin_supprimer():
     timbres_annee = load_year(year)
     timbres_annee = [t for t in timbres_annee if t["id"] != timbre_id]
     save_year(year, timbres_annee)
+    audit("ADMIN_SUPPRESSION", f"timbre={timbre['numero']} dossier={timbre.get('dossier') or '—'} date_achat={timbre['date_achat']}")
     flash(f"✓ Timbre {timbre['numero']} supprimé définitivement.", "success")
 
     return redirect(url_for("admin"))
@@ -1459,7 +1609,7 @@ if __name__ == "__main__":
     try:
         migrer_nommage()
     except Exception as exc:
-        print(f"  Avertissement migration nommage : {exc}")
+        print(f"  Avertissement migration nommage : {exc}", file=sys.stderr)
 
     port   = trouver_port(5000)
     url    = f"http://localhost:{port}"
